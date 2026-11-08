@@ -12,6 +12,17 @@ if ROOT_DIR not in sys.path:
 
 from app.main import app
 
+# ZeroGPU Compatibility Handler
+try:
+    import spaces
+    @spaces.GPU
+    def _zero_gpu_worker():
+        """Satisfies Hugging Face ZeroGPU runtime requirement."""
+        return True
+except Exception:
+    def _zero_gpu_worker():
+        return True
+
 try:
     import gradio as gr
 
@@ -24,6 +35,8 @@ try:
             "- 💚 **System Health**: [/api/health](./api/health)\n"
             "- 📚 **API Docs**: [/docs](./docs)"
         )
+        dummy_btn = gr.Button("GPU Check", visible=False)
+        dummy_btn.click(fn=_zero_gpu_worker, inputs=[], outputs=[])
 
     # Mount Gradio at /status so root '/' serves the full Wave SPA directly
     app = gr.mount_gradio_app(app, demo, path="/status")
@@ -33,4 +46,4 @@ except ImportError:
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 7860))
-    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
