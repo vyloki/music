@@ -57,12 +57,46 @@ Wave is a Progressive Web App (PWA). You can install it directly onto your phone
 
 ---
 
-## ⚡ Option 3: Deploy Free on Railway / Koyeb
+## ⚡ Option 3: Deploy on Koyeb (Free 24/7, No Monthly Hours Limit) — RECOMMENDED
 
-1. Go to [Railway.app](https://railway.app) or [Koyeb.com](https://koyeb.com).
-2. Click **Deploy from GitHub repo**.
-3. Add the `MONGODB_URI` and `JWT_SECRET` variables.
-4. Railway automatically detects `Dockerfile` and deploys your service.
+[Koyeb](https://www.koyeb.com/) offers a permanent **Free Eco instance** that runs 24/7 without the 750-hour monthly limit found on Render, and without the serverless 15-second audio timeout of Vercel!
+
+### Steps:
+1. Go to [app.koyeb.com](https://app.koyeb.com/) and sign up / log in with GitHub.
+2. Click **Create App** or **Create Service**.
+3. Choose **GitHub** as the deployment source and select your `music` repository.
+4. Koyeb automatically detects your `Dockerfile`.
+   - **Instance Type**: Select **Eco (Free)** (Nano or Micro).
+   - **Region**: Choose the closest region (e.g. Frankfurt, Washington DC, or Singapore).
+5. Under **Environment Variables**, add:
+   - `MONGODB_URI`: `<Your MongoDB Atlas connection string>`
+   - `JWT_SECRET`: `<Your Random Secret Key>`
+   - `JWT_ALGORITHM`: `HS256`
+   - `PORT`: `8000`
+6. Click **Deploy**. Koyeb will build the Docker container and give you a live HTTPS URL (e.g. `https://music-xxxx.koyeb.app`).
+
+---
+
+## 🛡️ Option 4: Zero-Downtime Multi-Deployment Failover (Render + Koyeb)
+
+If you have a deployment on Render (which has a 750 hours/month limit) AND a deployment on Koyeb, Wave now includes an **Automatic Multi-Backend Failover Engine**!
+
+### How it works:
+If your Primary server (e.g. Render) runs out of hours, goes to sleep, or fails, Wave automatically redirects all search, playlist, and audio streaming requests to your Backup server (e.g. Koyeb) with **zero service pause** and no manual configuration needed!
+
+### How to configure:
+In your browser console on the Wave app (or stored in `localStorage`):
+```javascript
+// Register your multi-backend cluster in order of priority:
+API.setServerNodes([
+    'https://music-xxxx.koyeb.app',       // Primary (24/7, No Hours Limit)
+    'https://wave-music.onrender.com'     // Standby Backup (Render)
+]);
+```
+Wave will automatically:
+1. Route requests to the active primary server.
+2. If the server returns `502`, `503`, `504` (asleep or limit reached) or drops connection, it instantly fails over to the standby server and retries seamlessly!
+3. If an audio track stream encounters a network drop, it re-connects through the backup server and resumes at the exact current second!
 
 ---
 

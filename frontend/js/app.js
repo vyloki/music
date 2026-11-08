@@ -5,10 +5,30 @@
  */
 
 // ============================================
-// API Client
+// API Client with Multi-Backend Automatic Failover
 // ============================================
 
 const API = {
+    // Registered backend server pool (Primary, Secondary, Standby)
+    // You can customize these in localStorage ('wave_server_nodes') or via settings
+    nodes: (function() {
+        if (typeof window !== 'undefined') {
+            const stored = localStorage.getItem('wave_server_nodes');
+            if (stored) {
+                try {
+                    const parsed = JSON.parse(stored);
+                    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+                } catch (e) {}
+            }
+            if (window.WAVE_BACKEND_NODES && Array.isArray(window.WAVE_BACKEND_NODES)) {
+                return window.WAVE_BACKEND_NODES;
+            }
+        }
+        return [];
+    })(),
+
+    activeNodeIndex: 0,
+
     baseUrl: (function() {
         if (typeof window !== 'undefined') {
             const stored = localStorage.getItem('wave_server_url');
@@ -34,6 +54,28 @@ const API = {
         }
     },
 
+    setServerNodes(nodes) {
+        if (Array.isArray(nodes)) {
+            this.nodes = nodes.map(n => n.replace(/\/+$/, ''));
+            if (typeof localStorage !== 'undefined') {
+                localStorage.setItem('wave_server_nodes', JSON.stringify(this.nodes));
+            }
+            if (this.nodes.length > 0 && !this.baseUrl) {
+                this.setBaseUrl(this.nodes[0]);
+            }
+        }
+    },
+
+    // Rotate to next healthy backend server during outage or hours limit
+    rotateServer() {
+        if (!this.nodes || this.nodes.length <= 1) return false;
+        this.activeNodeIndex = (this.activeNodeIndex + 1) % this.nodes.length;
+        const nextUrl = this.nodes[this.activeNodeIndex];
+        console.warn(`🔄 Backend failover triggered: switching to ${nextUrl}`);
+        this.setBaseUrl(nextUrl);
+        return true;
+    },
+
     getHeaders() {
         const headers = { 'Content-Type': 'application/json' };
         const token = localStorage.getItem('wave_access_token');
@@ -43,7 +85,7 @@ const API = {
         return headers;
     },
 
-    async request(method, url, body = null) {
+    async request(method, url, body = null, attempt = 0) {
         const options = {
             method,
             headers: this.getHeaders(),
@@ -67,6 +109,14 @@ const API = {
                 }
             }
 
+            // Server-side error (502, 503, 504: Host asleep, crashed, or monthly hours exceeded)
+            if (response.status >= 502 && response.status <= 504) {
+                if (attempt < (this.nodes.length || 1) && this.rotateServer()) {
+                    showToast('Switching to backup server...', 'info', 2000);
+                    return await this.request(method, url, body, attempt + 1);
+                }
+            }
+
             if (!response.ok) {
                 const error = await response.json().catch(() => ({}));
                 let errorMsg = `HTTP ${response.status}`;
@@ -82,6 +132,13 @@ const API = {
 
             return await response.json();
         } catch (error) {
+            // Network failure or connection refused (host offline/suspended)
+            const isNetworkError = error.name === 'TypeError' || error.message.includes('fetch') || error.message.includes('NetworkError');
+            if (isNetworkError && attempt < (this.nodes.length || 1) && this.rotateServer()) {
+                showToast('Server unavailable. Retrying on standby node...', 'info', 2000);
+                return await this.request(method, url, body, attempt + 1);
+            }
+
             console.debug(`API Error [${method} ${url}]:`, error);
             throw error;
         }

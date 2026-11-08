@@ -1546,6 +1546,16 @@ const Player = {
 
     onError(e) {
         console.warn('Native audio stream error on host:', e);
+        if (typeof API !== 'undefined' && API.nodes && API.nodes.length > 1 && API.rotateServer()) {
+            console.info('Retrying stream on backup server node...');
+            if (this.currentTrack) {
+                const curPos = this.audio ? this.audio.currentTime : 0;
+                this.loadTrack(this.currentTrack).then(() => {
+                    if (curPos > 0 && this.audio) this.audio.currentTime = curPos;
+                }).catch(() => {});
+                return;
+            }
+        }
         if (this.currentTrack && !this.currentTrack.isLocal && this.currentTrack.video_id && !this.currentTrack.video_id.startsWith('ext_') && this.activeEngine !== 'yt') {
             console.info('Switching to YouTube Audio Engine for seamless playback...');
             this.playViaYTBridge(this.currentTrack);
