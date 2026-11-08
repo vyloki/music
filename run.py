@@ -15,7 +15,8 @@ from app.config import settings
 
 def main():
     """Start the Wave server."""
-    port = int(os.environ.get("PORT", str(settings.port)))
+    default_port = "7860" if "SPACE_ID" in os.environ else str(settings.port)
+    port = int(os.environ.get("PORT", default_port))
     host = os.environ.get("HOST", settings.host)
     debug = settings.debug if "DEBUG" not in os.environ else os.environ.get("DEBUG", "false").lower() in ("1", "true", "yes")
 
