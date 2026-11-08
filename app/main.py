@@ -167,14 +167,32 @@ if os.path.exists(frontend_dir):
         name="static",
     )
 
-    # Serve index.html for the root path (SPA)
+    # Serve index.html for the root path (SPA) and fallback paths
     @app.get("/", include_in_schema=False)
+    @app.get("/frontend/index.html", include_in_schema=False)
+    @app.get("/index.html", include_in_schema=False)
     async def serve_frontend():
         """Serve the frontend SPA."""
         index_path = os.path.join(frontend_dir, "index.html")
         if os.path.exists(index_path):
             return FileResponse(index_path)
         return {"message": "🎵 Wave API is running. Frontend not found."}
+
+    @app.get("/manifest.json", include_in_schema=False)
+    async def serve_manifest():
+        """Serve web manifest."""
+        manifest_path = os.path.join(frontend_dir, "manifest.json")
+        if os.path.exists(manifest_path):
+            return FileResponse(manifest_path, media_type="application/manifest+json")
+        return JSONResponse({"detail": "Manifest not found"}, status_code=status.HTTP_404_NOT_FOUND)
+
+    @app.get("/sw.js", include_in_schema=False)
+    async def serve_service_worker():
+        """Serve service worker."""
+        sw_path = os.path.join(frontend_dir, "sw.js")
+        if os.path.exists(sw_path):
+            return FileResponse(sw_path, media_type="application/javascript")
+        return JSONResponse({"detail": "Service worker not found"}, status_code=status.HTTP_404_NOT_FOUND)
 else:
     @app.get("/", include_in_schema=False)
     async def root():
