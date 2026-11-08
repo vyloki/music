@@ -3,6 +3,7 @@
 # Web Framework
 fastapi==0.115.12
 uvicorn[standard]==0.34.3
+gradio>=5.0.0
 
 # MongoDB Async Driver
 motor==3.7.1
