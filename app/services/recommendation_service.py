@@ -11,7 +11,17 @@ Features:
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timezone, timedelta
 from app.database import database
-from app.services.youtube_service import search_youtube, get_related_videos
+from app.services.youtube_service import (
+    search_youtube,
+    get_related_videos,
+    is_official_music_source,
+    is_unofficial_source,
+    is_compilation_or_junk,
+    is_valid_single_song,
+    MAX_SONG_DURATION,
+    MIN_SONG_DURATION,
+    IDEAL_SONG_DURATION_MAX,
+)
 from app.utils.cache import home_feed_cache
 import logging
 import asyncio
@@ -19,16 +29,16 @@ import re
 
 logger = logging.getLogger(__name__)
 
-# Predefined categories for quick browsing
+# Predefined categories for quick browsing with official audio queries
 CATEGORIES = [
-    {"id": "trending", "name": "Trending Hits", "query": "Top trending songs 2025 official audio", "icon": "flame"},
-    {"id": "telugu", "name": "Telugu Hits", "query": "Latest Telugu hit songs", "icon": "music-2"},
-    {"id": "hindi", "name": "Bollywood Top", "query": "Top Bollywood romantic songs 2025", "icon": "sparkles"},
-    {"id": "english", "name": "Global Pop", "query": "Billboard top hits pop songs", "icon": "globe"},
-    {"id": "punjabi", "name": "Punjabi Beats", "query": "Top trending Punjabi songs", "icon": "zap"},
-    {"id": "tamil", "name": "Tamil Hits", "query": "Latest Tamil blockbuster songs", "icon": "disc"},
+    {"id": "trending", "name": "Trending Hits", "query": "Top trending songs official audio", "icon": "flame"},
+    {"id": "telugu", "name": "Telugu Hits", "query": "Latest Telugu hit songs official audio", "icon": "music-2"},
+    {"id": "hindi", "name": "Bollywood Top", "query": "Top Bollywood romantic songs official audio", "icon": "sparkles"},
+    {"id": "english", "name": "Global Pop", "query": "Billboard top hits pop songs official audio", "icon": "globe"},
+    {"id": "punjabi", "name": "Punjabi Beats", "query": "Top trending Punjabi songs official audio", "icon": "zap"},
+    {"id": "tamil", "name": "Tamil Hits", "query": "Latest Tamil blockbuster songs official audio", "icon": "disc"},
     {"id": "lofi", "name": "Chill & Lo-Fi", "query": "Chill lofi hip hop beats to relax", "icon": "coffee"},
-    {"id": "rock", "name": "Rock & Indie", "query": "Indie rock top tracks", "icon": "guitar"},
+    {"id": "rock", "name": "Rock & Indie", "query": "Indie rock top tracks official audio", "icon": "guitar"},
 ]
 
 
@@ -56,7 +66,7 @@ def get_time_of_day_context() -> dict:
             "subtitle": "Start your day with fresh acoustic & melodic vibes",
             "icon": "sunrise",
             "mood": "fresh_acoustic",
-            "query_template": "{lang} morning pleasant melody songs",
+            "query_template": "{lang} morning pleasant melody songs official audio",
         }
     elif 12 <= hour < 17:
         return {
@@ -66,7 +76,7 @@ def get_time_of_day_context() -> dict:
             "subtitle": "Keep your rhythm going with feel-good hits",
             "icon": "sun",
             "mood": "upbeat_focus",
-            "query_template": "{lang} super hit upbeat songs",
+            "query_template": "{lang} super hit upbeat songs official audio",
         }
     elif 17 <= hour < 22:
         return {
@@ -76,7 +86,7 @@ def get_time_of_day_context() -> dict:
             "subtitle": "Top trending chartbusters & sunset melodies",
             "icon": "sunset",
             "mood": "trending_party",
-            "query_template": "{lang} top trending blockbuster songs",
+            "query_template": "{lang} top trending blockbuster songs official audio",
         }
     else:
         return {
@@ -86,7 +96,7 @@ def get_time_of_day_context() -> dict:
             "subtitle": "Unwind with soulful melodies & chill acoustic vibes",
             "icon": "moon",
             "mood": "chill_lofi",
-            "query_template": "{lang} soulful late night romantic melody songs",
+            "query_template": "{lang} soulful late night romantic melody songs official audio",
         }
 
 
@@ -138,26 +148,26 @@ async def get_song_radio(
     # === FAN OUT MULTI-SOURCE SEARCHES IN PARALLEL ===
     tasks = []
 
-    # 1. YouTube related videos
+    # 1. YouTube related videos (strictly filtered for authentic single songs)
     if video_id:
         tasks.append(get_related_videos(video_id, max_results=12))
     else:
         tasks.append(asyncio.sleep(0, result=[]))
 
-    # 2. Artist hit songs cluster
+    # 2. Artist hit songs cluster (official audio)
     if clean_artist:
-        artist_q = f"{clean_artist} {language} hit songs"
-        tasks.append(search_youtube(artist_q, max_results=8))
+        artist_q = f"{clean_artist} {language} hit songs official audio"
+        tasks.append(search_youtube(artist_q, max_results=8, filter_mode="song"))
     else:
         tasks.append(asyncio.sleep(0, result=[]))
 
-    # 3. Movie soundtrack / Same vibe cluster
+    # 3. Movie soundtrack / Same vibe cluster (official audio)
     if movie and movie.lower() != track_name.lower():
-        movie_q = f"{movie} {language} songs"
-        tasks.append(search_youtube(movie_q, max_results=6))
+        movie_q = f"{movie} {language} songs official audio"
+        tasks.append(search_youtube(movie_q, max_results=6, filter_mode="song"))
     else:
-        genre_q = f"{language} latest hit melody songs"
-        tasks.append(search_youtube(genre_q, max_results=6))
+        genre_q = f"{language} latest hit melody songs official audio"
+        tasks.append(search_youtube(genre_q, max_results=6, filter_mode="song"))
 
     # 4. Collaborative Transition Graph lookups
     async def _get_graph_candidates():
@@ -174,7 +184,8 @@ async def get_song_radio(
                 for doc in docs:
                     tid = doc.pop("_id", None)
                     doc["video_id"] = tid
-                    tracks.append(doc)
+                    if is_valid_single_song(doc):
+                        tracks.append(doc)
                 return tracks
         except Exception:
             pass
@@ -203,9 +214,23 @@ async def get_song_radio(
         if not vid or vid == video_id:
             return  # Don't recommend the currently playing track
 
-        # Ignore 1hr+ full jukeboxes / dj mixes or < 60s clips
+        # Strict Single-Song Guardrails:
+        # 1. Ignore compilations / jukeboxes (> 360s / 6 mins) or < 45s clips
         duration = t.get("duration", 0)
-        if duration > 700 or (0 < duration < 60):
+        if duration > MAX_SONG_DURATION or (0 < duration < MIN_SONG_DURATION):
+            return
+        if t.get("track_type") == "playlist":
+            return
+
+        title = t.get("title") or t.get("track_name") or ""
+        uploader = t.get("artist") or t.get("uploader") or t.get("channel") or ""
+
+        # 2. Reject compilation titles, full movies, and fan-edited audio
+        if is_compilation_or_junk(title, duration):
+            return
+
+        # 3. Reject unofficial fan-made channels (editz, status, slowed, fanclub, etc.)
+        if is_unofficial_source(uploader):
             return
 
         if vid not in candidates:
@@ -214,6 +239,14 @@ async def get_song_radio(
             scores[vid] = base_score
         else:
             scores[vid] += base_score  # Boost if returned by multiple sources
+
+        # Boost verified official music channels and celebrity artists heavily
+        if is_official_music_source(uploader, title) or t.get("is_official"):
+            scores[vid] += 50.0
+
+        # Ideal song duration bonus (+15.0) for standard 2-5 min songs
+        if MIN_SONG_DURATION <= duration <= IDEAL_SONG_DURATION_MAX:
+            scores[vid] += 15.0
 
         # Language affinity scoring
         track_lang = (t.get("language") or "").lower()
@@ -226,7 +259,7 @@ async def get_song_radio(
 
         # Artist affinity scoring
         if clean_artist and clean_artist.lower() in (t.get("artist", "") + " " + t.get("title", "")).lower():
-            scores[vid] += 15.0
+            scores[vid] += 20.0
 
         # Movie / Album affinity scoring
         if movie and movie.lower() in (t.get("movie", "") + " " + t.get("title", "")).lower():
@@ -236,7 +269,7 @@ async def get_song_radio(
         _process_track(t, 25.0, "Similar Vibe")
 
     for t in artist_tracks:
-        _process_track(t, 22.0, f"More by {clean_artist or 'Artist'}")
+        _process_track(t, 25.0, f"More by {clean_artist or 'Artist'}")
 
     for t in vibe_tracks:
         _process_track(t, 18.0, "Trending in " + language)
@@ -248,14 +281,14 @@ async def get_song_radio(
     sorted_vids = sorted(scores.keys(), key=lambda k: scores[k], reverse=True)
     ranked_tracks = [candidates[vid] for vid in sorted_vids[:limit]]
 
-    # If too few candidates found, fallback to general search in target language
+    # If too few candidates found, fallback to official single-song search in target language
     if len(ranked_tracks) < 6:
-        fallback_query = f"{language} top songs"
-        extras = await search_youtube(fallback_query, max_results=8)
+        fallback_query = f"{language} top hit songs official audio"
+        extras = await search_youtube(fallback_query, max_results=8, filter_mode="song")
         seen_ids = set(t["video_id"] for t in ranked_tracks)
         seen_ids.add(video_id)
         for e in extras:
-            if e.get("video_id") and e["video_id"] not in seen_ids:
+            if e.get("video_id") and e["video_id"] not in seen_ids and is_valid_single_song(e):
                 seen_ids.add(e["video_id"])
                 e["vibe_reason"] = f"Top {language} Hit"
                 ranked_tracks.append(e)
@@ -342,12 +375,12 @@ async def get_personalized_home_feed(user_id: Optional[str] = None) -> dict:
         except Exception as e:
             logger.debug(f"User profile inference error: {e}")
 
-    # Build queries
+    # Build queries with official audio markers
     mood_query = time_ctx["query_template"].format(lang=preferred_lang)
-    for_you_query = f"{top_artist} {preferred_lang} hit songs" if top_artist else f"{preferred_lang} super hit songs"
+    for_you_query = f"{top_artist} {preferred_lang} hit songs official audio" if top_artist else f"{preferred_lang} super hit songs official audio"
 
-    mood_task = search_youtube(mood_query, max_results=10)
-    for_you_task = search_youtube(for_you_query, max_results=10)
+    mood_task = search_youtube(mood_query, max_results=10, filter_mode="song")
+    for_you_task = search_youtube(for_you_query, max_results=10, filter_mode="song")
     trending_task = get_trending_tracks("trending", 10)
     telugu_task = get_trending_tracks("telugu", 10)
     hindi_task = get_trending_tracks("hindi", 10)
@@ -359,8 +392,8 @@ async def get_personalized_home_feed(user_id: Optional[str] = None) -> dict:
         return_exceptions=True
     )
 
-    mood_tracks = results[0] if isinstance(results[0], list) else []
-    for_you_tracks = results[1] if isinstance(results[1], list) else []
+    mood_tracks = [t for t in results[0] if is_valid_single_song(t)] if isinstance(results[0], list) else []
+    for_you_tracks = [t for t in results[1] if is_valid_single_song(t)] if isinstance(results[1], list) else []
     trending_tracks = results[2] if isinstance(results[2], list) else []
     telugu_tracks = results[3] if isinstance(results[3], list) else []
     hindi_tracks = results[4] if isinstance(results[4], list) else []
@@ -405,7 +438,8 @@ async def get_trending_tracks(category: str = "trending", limit: int = 15) -> Li
 
     cat_info = next((c for c in CATEGORIES if c["id"] == category), CATEGORIES[0])
     query = cat_info["query"]
-    tracks = await search_youtube(query, max_results=limit)
+    raw_tracks = await search_youtube(query, max_results=limit, filter_mode="song")
+    tracks = [t for t in raw_tracks if is_valid_single_song(t)]
 
     if db is not None and tracks:
         try:

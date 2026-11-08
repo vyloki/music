@@ -69,9 +69,9 @@ async def warm_artist_cache(artist_name: str, language: str, db) -> None:
     """Pre-warm song cache for an artist's top tracks in a given language."""
     from app.services.youtube_service import search_youtube
 
-    query = f"{artist_name} {language} songs".strip()
+    query = f"{artist_name} {language} hit songs official audio".strip()
     try:
-        tracks = await search_youtube(query, max_results=10)
+        tracks = await search_youtube(query, max_results=10, filter_mode="song")
         if db is not None and tracks:
             for t in tracks:
                 vid = t.get("video_id")

@@ -20,6 +20,257 @@ logger = logging.getLogger(__name__)
 # Dedicated bounded thread pool for yt-dlp worker threads
 _ytdlp_executor = ThreadPoolExecutor(max_workers=10, thread_name_prefix="ytdlp_worker")
 
+# Duration thresholds (in seconds)
+# Typical individual songs are between 90s and 300s (under 5 minutes).
+# Hard ceiling: 360s (6 minutes). Anything > 360s is considered a playlist/compilation.
+MAX_SONG_DURATION = 360
+MIN_SONG_DURATION = 45
+IDEAL_SONG_DURATION_MAX = 300
+
+# Verified Major Record Labels & Production Studios
+OFFICIAL_RECORD_LABELS = [
+    # T-Series (National & Regional)
+    "t-series", "tseries", "t series", "t-series telugu", "t-series tamil",
+    "t-series kannada", "t-series malayalam", "t-series apna punjab", "t-series bhakti sagar",
+    "t-series bangla", "t-series pop chartbusters", "t-series regional", "t-series stage",
+    # Aditya Music
+    "aditya music", "adityamusic", "aditya movies", "aditya devotional",
+    "aditya music telugu", "aditya music tamil",
+    # Saregama (National & Regional)
+    "saregama", "saregama music", "saregama telugu", "saregama tamil", "saregama south",
+    "saregama malayalam", "saregama kannada", "saregama hum bhojpuri", "saregama bengali",
+    "saregama classical", "saregama punjabi", "saregama ghazal",
+    # Sony Music
+    "sony music", "sonymusic", "sony music south", "sonymusicsouthvevo", "sony music india",
+    "sonymusicindiavevo", "sony music entertainment",
+    # Zee Music
+    "zee music", "zeemusic", "zee music company", "zee music south", "zee music telugu",
+    "zee music tamil", "zee music kannada", "zee music bhojpuri", "zee music classics",
+    # Think Music
+    "think music", "think music india", "think music telugu", "think music tamil",
+    "think music malayalam", "think music kannada",
+    # Lahari Music
+    "lahari music", "lahari", "lahari music | t-series", "lahari telugu", "lahari tamil", "lahari kannada",
+    # Tips
+    "tips official", "tips telugu", "tips tamil", "tips industries", "tips punjabi",
+    "tips bhojpuri", "tips music", "tips films",
+    # Sun Pictures / Network
+    "sun pictures", "sun tv", "sun music", "sun nxt",
+    # YRF & Eros
+    "yrf", "yash raj films", "yrf music", "eros now", "eros now music",
+    # Malayalam / Tamil / Kannada / Punjabi specialists
+    "muzik247", "divo music", "divo movies", "divo", "u1 records", "u1 music",
+    "speed records", "white hill music", "saga hits", "saga music", "geet mp3", "jass records",
+    "anand audio", "jhankar music", "a2 music", "ashwini recording company",
+    "times music", "junglee music", "venus", "venus worldwide",
+    # Global Majors & VEVO
+    "universal music", "warner music", "warner records", "vevo", "columbia records",
+    "atlantic records", "interscope", "republic records", "def jam", "rca records",
+    # Regional film production houses releasing official soundtracks
+    "mango music", "madhura audio", "madhura music", "svf music", "svf", "amara muzik",
+    "satyam videos", "satyam audios", "manorama music", "goodwill entertainments",
+    "behindwoods", "behindwoods air", "kvn productions", "kvn", "mythri movie makers",
+    "geetha arts", "sri venkateswara creations", "svc", "hombale films",
+    "vyjayanthi network", "vyjayanthi movies", "lyca productions", "red giant movies",
+    "dharma productions", "nadiadwala grandson",
+]
+
+# Verified Celebrity Artists, Music Directors & Professional Singers
+OFFICIAL_CELEBRITY_ARTISTS = [
+    # Top Composers & Music Directors
+    "anirudh", "anirudh ravichander", "a.r. rahman", "ar rahman", "a r rahman",
+    "devi sri prasad", "dsp", "thaman s", "s. thaman", "thaman", "santhosh narayanan",
+    "harris jayaraj", "yuvan shankar raja", "ilaiyaraaja", "ilayaraja", "m.m. keeravaani",
+    "m m keeravaani", "keeravaani", "m m kreem", "g.v. prakash", "gv prakash",
+    "g v prakash kumar", "d. imman", "d imman", "hiphop tamizha", "sushin shyam",
+    "hesham abdul wahab", "sam c.s.", "sam cs", "mickey j meyer", "mickey j. meyer",
+    "vivek-mervin", "vivek mervin", "vidyasagar", "sachin-jigar", "sachin jigar",
+    "pritam", "amit trivedi", "vishal-shekhar", "vishal shekhar", "shankar-ehsaan-loy",
+    "ajay-atul", "mithoon", "amaal mallik", "tanishk bagchi", "bheems ceciroleo",
+    "bheems cecirolio", "bheems", "chaitan bharadwaj", "sai abhyankkar", "radhan",
+    # Top Celebrity Singers
+    "arijit singh", "sid sriram", "shreya ghoshal", "s.p. balasubrahmanyam", "spb",
+    "s p balasubrahmanyam", "k.j. yesudas", "kj yesudas", "k.s. chithra", "ks chithra",
+    "s. janaki", "s janaki", "hariharan", "shankar mahadevan", "sonu nigam",
+    "shaan", "mohit chauhan", "armaan malik", "vishal mishra", "darshan raval",
+    "jubin nautiyal", "atif aslam", "neha kakkar", "diljit dosanjh", "badshah",
+    "guru randhawa", "ap dhillon", "karan aujla", "pradeep kumar", "anurag kulkarni",
+    "ram miriyala", "rahul sipligunj", "mangli", "jasleen royal", "jonita gandhi",
+    "sunidhi chauhan", "chinmayi", "shakthisree gopalan", "dhee", "andrea jeremiah",
+    "vijay prakash", "karthik", "unni menon", "sujatha mohan", "sujatha", "mano",
+    "swarnalatha", "haricharan", "naresh iyer", "lucky ali", "kk", "udit narayan",
+    "kumar sanu", "alka yagnik", "kavita krishnamurthy", "lata mangeshkar",
+    "mohammed rafi", "kishore kumar", "asha bhosle", "mukesh",
+    # Global Icons
+    "taylor swift", "ed sheeran", "the weeknd", "bruno mars", "dua lipa", "billie eilish",
+    "justin bieber", "adele", "drake", "coldplay", "imagine dragons", "eminem",
+    "post malone", "charlie puth", "shawn mendes", "alan walker", "avicii",
+    "rihanna", "beyonce", "katy perry", "maroon 5", "selena gomez", "david guetta", "marshmello"
+]
+
+# Unofficial channel indicators to reject
+UNOFFICIAL_CHANNELS = [
+    "editz", "edits", "editor", "status", "whatsapp", "slowed", "reverb", "nightcore",
+    "bass boosted", "bassboosted", "8d audio", "3d audio", "fan club", "fanclub",
+    "fan made", "fan page", "dance floor", "dance cover", "choreography", "talkies",
+    "movies", "cinema", "infinitum", "filmy", "film review", "reaction", "reviews",
+    "public talk", "vlog", "vlogs", "troll", "comedy", "scenes", "clips", "shorts",
+    "night vibe", "lofi zone", "lofi", "chill vibe", "vibes only", "song lyrics", "musical bytes",
+    "musical haven", "jukebox world", "playlist hub", "playlist", "mix labs", "audio hub",
+    "lyric video", "lyrics video"
+]
+
+# Patterns for compilation, jukebox, playlist, or movie videos
+COMPILATION_PATTERNS = [
+    r"\bjukebox\b", r"\baudio jukebox\b", r"\bvideo jukebox\b", r"\bmega jukebox\b",
+    r"\ball songs\b", r"\bfull album\b", r"\bsuper hits collection\b", r"\bhit songs collection\b",
+    r"\bsuperhit songs\b", r"\bsuper hit songs\b", r"\bpower packed hits\b", r"\bblockbuster hits\b",
+    r"\btop\s*\d+\b", r"\bback to back\b", r"\bnon\s*stop\b", r"\bnonstop\b",
+    r"\bcompilation\b", r"\bbest of\b", r"\baudio playlist\b", r"\bvideo playlist\b",
+    r"\bevergreen hits\b", r"\bsuperhits collection\b", r"\bvol\.\s*\d+", r"\bvolume\s*\d+",
+    r"\bpart[\s-]*\d+\s*full\b", r"\bpart[\s-]*\d+\b",
+    r"\bfull movie\b", r"\bmovie scenes\b", r"\bfull hd movie\b", r"\bmovie online\b",
+    r"\bpress meet\b", r"\bpublic talk\b", r"\bsuccess meet\b",
+    r"\bslowed\s*(\+|\&)?\s*reverb\b", r"\bbass boosted\b", r"\b8d audio\b", r"\b3d audio\b",
+    r"\bwhatsapp status\b", r"\bstatus video\b", r"\bdance cover\b", r"\breaction\b",
+    r"\bfan made\b", r"\bedit audio\b", r"\b1 hour loop\b", r"\b10 hours\b",
+    r"\b1 hour version\b", r"\bloop\b", r"\bdj remix\b", r"\bmashup\b"
+]
+
+
+def is_official_music_source(uploader: str, title: str = "") -> bool:
+    """
+    Check if the uploader is an official record label (e.g. T-Series, Aditya Music, Saregama),
+    an Official Artist Channel ending with ' - Topic', a VEVO channel, or a verified celebrity singer/composer.
+    """
+    if not uploader:
+        return False
+    u = uploader.lower().strip()
+
+    # 1. YouTube Official Artist Channel (OAC)
+    if u.endswith(" - topic"):
+        return True
+
+    # 2. VEVO official channel
+    if "vevo" in u:
+        return True
+
+    # 3. Major Record Labels & Production Studios
+    if any(label in u for label in OFFICIAL_RECORD_LABELS):
+        return True
+
+    # 4. Celebrity Artists / Composers / Singers
+    if any(artist in u for artist in OFFICIAL_CELEBRITY_ARTISTS):
+        return True
+
+    # 5. Title mentions official production with studio tag
+    t = (title or "").lower()
+    if any(label in t for label in ["t-series", "aditya music", "saregama", "sony music", "zee music"]):
+        return True
+
+    # 6. Channel has explicit official indicators and is not blacklisted
+    if any(w in u for w in ["records", "studios", "pictures", "films", "entertainment"]):
+        if not is_unofficial_source(uploader):
+            return True
+
+    return False
+
+
+def is_unofficial_source(uploader: str) -> bool:
+    """
+    Check if uploader is an amateur/fan-made channel (editz, status, slowed, fanclub, etc.).
+    """
+    if not uploader:
+        return False
+    u = uploader.lower().strip()
+
+    # Don't flag official labels even if they have "music" or "movies" (e.g. Aditya Movies)
+    if any(label in u for label in OFFICIAL_RECORD_LABELS):
+        return False
+    if u.endswith(" - topic") or "vevo" in u:
+        return False
+
+    return any(pattern in u for pattern in UNOFFICIAL_CHANNELS)
+
+
+def is_compilation_or_junk(title: str, duration: int = 0) -> bool:
+    """
+    Check if title or duration indicates a compilation, jukebox, full album, movie, or fan-modified audio.
+    """
+    if duration > MAX_SONG_DURATION:
+        return True
+    t = (title or "").lower()
+    for p in COMPILATION_PATTERNS:
+        if re.search(p, t):
+            return True
+    return False
+
+
+def is_valid_single_song(track: dict) -> bool:
+    """
+    Validates that a track is a genuine single song:
+    - Duration between MIN_SONG_DURATION (45s) and MAX_SONG_DURATION (360s, or 0 if unprobed)
+    - Not a compilation, jukebox, full album, or movie
+    - Not from an unofficial channel (editz, status, slowed, fan made, etc.)
+    - track_type is 'song' or 'bgm' (not 'playlist')
+    """
+    if not track or not isinstance(track, dict):
+        return False
+    dur = int(track.get("duration") or 0)
+    if dur > MAX_SONG_DURATION:
+        return False
+    if 0 < dur < MIN_SONG_DURATION:
+        return False
+    title = track.get("title") or track.get("track_name") or ""
+    if is_compilation_or_junk(title, dur):
+        return False
+    uploader = track.get("artist") or track.get("uploader") or track.get("channel") or ""
+    if is_unofficial_source(uploader):
+        return False
+    if track.get("track_type") == "playlist":
+        return False
+    return True
+
+
+def compute_track_quality_score(track: dict, query: str = "") -> float:
+    """
+    Computes ranking score for YouTube search results:
+    - Official record labels / OAC / celebrity artists: +100.0
+    - Verified / official music keywords in uploader: +40.0
+    - Ideal song duration (120s - 300s): +30.0
+    - Clean duration (45s - 360s): +15.0
+    - Unofficial channel: -150.0
+    - Long duration (> 360s): -300.0
+    """
+    score = 0.0
+    dur = int(track.get("duration") or 0)
+    upl = track.get("artist") or track.get("uploader") or track.get("channel") or ""
+    title = track.get("title") or track.get("track_name") or ""
+
+    if is_official_music_source(upl, title):
+        score += 100.0
+    elif any(w in upl.lower() for w in ["music", "records", "audio", "studios"]):
+        score += 35.0
+
+    if is_unofficial_source(upl):
+        score -= 150.0
+
+    if dur > MAX_SONG_DURATION:
+        score -= 300.0
+    elif 90 <= dur <= IDEAL_SONG_DURATION_MAX:
+        score += 30.0
+    elif MIN_SONG_DURATION <= dur <= MAX_SONG_DURATION:
+        score += 15.0
+
+    # Query matching in title
+    if query:
+        q_words = [w.lower() for w in query.split() if len(w) > 2]
+        title_lower = title.lower()
+        matched = sum(1 for w in q_words if w in title_lower)
+        score += matched * 10.0
+
+    return score
+
 # yt-dlp options for fast flat search
 SEARCH_OPTS = {
     "quiet": True,
@@ -264,21 +515,13 @@ def _parse_track_metadata(raw_title: str, uploader: str, query: str = "") -> dic
 def _classify_track_type(raw_title: str, duration: int) -> str:
     """
     Classify a track as 'song', 'bgm', or 'playlist' based on title keywords and duration.
-    - playlist: duration > 600s (10 min), OR title has compilation/jukebox/playlist keywords
-    - bgm: title has bgm/background/instrumental/theme keywords AND duration < 600s
-    - song: everything else
+    - playlist: duration > MAX_SONG_DURATION (360s / 6 min), OR title has compilation/jukebox/playlist keywords
+    - bgm: title has bgm/background/instrumental/theme keywords AND duration <= MAX_SONG_DURATION
+    - song: everything else (individual songs under 6 minutes)
     """
     title_lower = raw_title.lower()
 
-    # Playlist indicators: long compilations, jukeboxes, albums
-    playlist_keywords = [
-        'jukebox', 'audio playlist', 'video playlist', 'top 10', 'top 20', 'top 30',
-        'best of', 'collection', 'hits', 'mashup', 'medley', 'all songs',
-        'full album', 'non stop', 'nonstop', 'vol.', 'vol ', 'volume',
-        'part-1', 'part 1', 'part-2', 'part 2', '90s hits', '80s hits',
-        'superhits', 'super hits', 'evergreen', 'back to back',
-    ]
-    if duration > 600 or any(kw in title_lower for kw in playlist_keywords):
+    if duration > MAX_SONG_DURATION or is_compilation_or_junk(raw_title, duration):
         return 'playlist'
 
     # BGM / instrumental indicators
@@ -290,6 +533,10 @@ def _classify_track_type(raw_title: str, duration: int) -> str:
         return 'bgm'
 
     return 'song'
+
+
+# Public alias
+classify_track_type = _classify_track_type
 
 
 
@@ -330,6 +577,7 @@ def _extract_track_from_entry(entry: dict, query: str = "") -> Optional[dict]:
 
     duration = int(entry.get("duration") or 0)
     track_type = _classify_track_type(raw_title, duration)
+    official = is_official_music_source(uploader or meta["artist"], raw_title)
 
     return {
         "video_id": video_id,
@@ -346,20 +594,31 @@ def _extract_track_from_entry(entry: dict, query: str = "") -> Optional[dict]:
         "webpage_url": f"https://www.youtube.com/watch?v={video_id}",
         "source": "youtube",
         "track_type": track_type,
+        "is_official": official,
+        "channel": uploader,
     }
 
 
 async def search_youtube(
     query: str,
-    max_results: int = 20
+    max_results: int = 20,
+    filter_mode: str = "song",
 ) -> List[dict]:
     """
     Search YouTube for songs matching the query.
+    Enforces strict filtering:
+      - Song duration <= MAX_SONG_DURATION (360s / 6 mins) and >= MIN_SONG_DURATION (45s).
+      - Rejects unofficial fan channels (editz, status, slowed, fan made, etc.).
+      - Rejects compilations, jukeboxes, full albums, and movies.
+      - Prioritizes official record labels (T-Series, Aditya Music, Saregama, Sony, Zee, Think Music)
+        and verified celebrity artists/singers (Anirudh, AR Rahman, Sid Sriram, Arijit Singh, etc.).
     Returns a list of track info dictionaries.
     """
     def _search():
-        results = []
-        search_query = f"ytsearch{max_results}:{query}"
+        # Fetch up to 2x results to allow thorough filtering of unofficial content
+        fetch_count = max(max_results * 2, 25)
+        search_query = f"ytsearch{fetch_count}:{query}"
+        candidates = []
 
         try:
             with yt_dlp.YoutubeDL(SEARCH_OPTS) as ydl:
@@ -368,16 +627,70 @@ async def search_youtube(
                     for entry in info["entries"]:
                         track = _extract_track_from_entry(entry, query=query)
                         if track and track["video_id"]:
-                            results.append(track)
+                            candidates.append(track)
         except Exception as e:
             logger.error(f"YouTube search error for '{query}': {e}")
+            return []
 
-        return results
+        if not candidates:
+            return []
+
+        # If user explicitly searches for compilation/jukebox/album, keep playlist entries
+        q_lower = query.lower()
+        wants_compilation = any(k in q_lower for k in ["jukebox", "all songs", "full album", "playlist", "compilation"])
+
+        if filter_mode == "song" and not wants_compilation:
+            filtered = []
+            for t in candidates:
+                dur = t.get("duration", 0)
+                upl = t.get("channel") or t.get("artist") or ""
+                title = t.get("title") or t.get("track_name") or ""
+
+                # Discard tracks over 6 minutes (360s) or under 45s (if duration is known)
+                if dur > MAX_SONG_DURATION or (0 < dur < MIN_SONG_DURATION):
+                    continue
+
+                # Discard compilation, jukebox, or movie titles
+                if is_compilation_or_junk(title, dur):
+                    continue
+
+                # Discard unofficial channels (editz, status, slowed, etc.)
+                if is_unofficial_source(upl):
+                    continue
+
+                # Discard classified playlists
+                if t.get("track_type") == "playlist":
+                    continue
+
+                filtered.append(t)
+
+            # Sort filtered tracks by quality score (official channels first, ideal duration next)
+            filtered.sort(key=lambda t: compute_track_quality_score(t, query), reverse=True)
+
+            # If strict filtering left fewer than requested, salvage clean candidates with dur <= 360s
+            if len(filtered) < max_results:
+                seen_ids = set(t["video_id"] for t in filtered)
+                for t in candidates:
+                    vid = t.get("video_id")
+                    dur = t.get("duration", 0)
+                    if vid and vid not in seen_ids:
+                        if dur <= MAX_SONG_DURATION and not is_compilation_or_junk(t.get("title", ""), dur):
+                            if not is_unofficial_source(t.get("channel", "")):
+                                filtered.append(t)
+                                seen_ids.add(vid)
+                                if len(filtered) >= max_results:
+                                    break
+
+            return filtered[:max_results]
+
+        # For "all" or explicit album/compilation queries, rank official single songs first, keep others marked
+        candidates.sort(key=lambda t: compute_track_quality_score(t, query), reverse=True)
+        return candidates[:max_results]
 
     loop = asyncio.get_running_loop()
     results = await loop.run_in_executor(_ytdlp_executor, _search)
 
-    logger.info(f"🔍 YouTube search '{query}': {len(results)} results")
+    logger.info(f"🔍 YouTube search '{query}' (mode={filter_mode}): {len(results)} clean results")
     return results
 
 
@@ -427,6 +740,8 @@ async def get_video_info(video_id: str) -> Optional[dict]:
                         "webpage_url": cached.get("webpage_url") or f"https://www.youtube.com/watch?v={video_id}",
                         "source": cached.get("source") or "youtube",
                         "track_type": cached.get("track_type") or "song",
+                        "is_official": cached.get("is_official", False),
+                        "channel": cached.get("channel", ""),
                     }
         except Exception as e:
             logger.debug(f"Song cache lookup skipped for {video_id}: {e}")
@@ -574,7 +889,7 @@ get_youtube_suggestions = get_search_suggestions
 
 
 async def get_related_videos(video_id: str, max_results: int = 10) -> List[dict]:
-    """Get related/recommended tracks for a given video."""
+    """Get related/recommended tracks for a given video, strictly filtering for authentic single songs."""
     def _get_related():
         url = f"https://www.youtube.com/watch?v={video_id}"
         opts = {
@@ -590,11 +905,17 @@ async def get_related_videos(video_id: str, max_results: int = 10) -> List[dict]
                 info = ydl.extract_info(url, download=False)
                 if info:
                     related = info.get("related_videos", []) or []
-                    for entry in related[:max_results]:
+                    for entry in related:
                         track = _extract_track_from_entry(entry)
-                        if track and track["video_id"]:
-                            track["source"] = "youtube_related"
-                            results.append(track)
+                        if not track or not track.get("video_id"):
+                            continue
+                        # Strictly enforce single-song & official standards
+                        if not is_valid_single_song(track):
+                            continue
+                        track["source"] = "youtube_related"
+                        results.append(track)
+                        if len(results) >= max_results:
+                            break
         except Exception as e:
             logger.warning(f"Related videos error for {video_id}: {e}")
 
@@ -743,3 +1064,8 @@ class YouTubeService:
     get_language_versions = staticmethod(get_language_versions)
     search_multi_language = staticmethod(search_multi_language)
     get_trending_multi_language = staticmethod(get_trending_multi_language)
+    is_official_music_source = staticmethod(is_official_music_source)
+    is_unofficial_source = staticmethod(is_unofficial_source)
+    is_compilation_or_junk = staticmethod(is_compilation_or_junk)
+    is_valid_single_song = staticmethod(is_valid_single_song)
+    classify_track_type = staticmethod(classify_track_type)

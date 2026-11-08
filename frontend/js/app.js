@@ -751,16 +751,22 @@ async function performSearch(query, updateHash = true) {
 // Classify a track on frontend (fallback if backend didn't classify)
 function classifyTrack(track) {
     if (track.track_type && ['song', 'bgm', 'playlist'].includes(track.track_type)) {
+        if (track.track_type === 'playlist') return 'playlist';
+        // Enforce max single song duration (360 seconds / 6 minutes)
+        if (track.duration > 360) return 'playlist';
         return track.track_type;
     }
     // Fallback classification
     const title = (track.title || track.track_name || '').toLowerCase();
     const dur = track.duration || 0;
-    const playlistKw = ['jukebox', 'playlist', 'top 10', 'top 20', 'best of', 'collection',
+    const playlistKw = [
+        'jukebox', 'playlist', 'top 10', 'top 20', 'top 30', 'best of', 'collection',
         'hits', 'mashup', 'medley', 'nonstop', 'non stop', 'superhits', 'super hits',
-        'full album', 'back to back', 'vol ', 'vol.', 'evergreen'];
+        'full album', 'back to back', 'vol ', 'vol.', 'evergreen', 'all songs',
+        'part 1', 'part 2', 'part-1', 'part-2', 'compilation', 'full movie', 'movie scenes'
+    ];
     const bgmKw = ['bgm', 'background music', 'instrumental', 'theme music', 'ost', 'ringtone'];
-    if (dur > 600 || playlistKw.some(k => title.includes(k))) return 'playlist';
+    if (dur > 360 || playlistKw.some(k => title.includes(k))) return 'playlist';
     if (bgmKw.some(k => title.includes(k))) return 'bgm';
     return 'song';
 }
@@ -1461,7 +1467,21 @@ function playTrackFromResults(index) {
     if (!track) return;
 
     if (typeof Player !== 'undefined') {
-        Player.setQueue(AppState.searchResults, index);
+        const clickedType = classifyTrack(track);
+        let queueTracks = AppState.searchResults;
+        let targetIndex = index;
+        // If playing a song, queue only individual songs (exclude 30+ min playlists or movies)
+        if (clickedType === 'song') {
+            const songTracks = AppState.searchResults.filter(t => classifyTrack(t) === 'song');
+            if (songTracks.length > 0) {
+                const newIdx = songTracks.findIndex(t => t.video_id === track.video_id);
+                if (newIdx !== -1) {
+                    queueTracks = songTracks;
+                    targetIndex = newIdx;
+                }
+            }
+        }
+        Player.setQueue(queueTracks, targetIndex);
         Player.play(track);
     }
 }

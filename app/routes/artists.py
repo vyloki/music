@@ -171,37 +171,33 @@ async def get_artist_profile(
     if lang_filter:
         search_queries = [
             f"{artist_clean} {lang_filter} hit songs official audio",
-            f"{artist_clean} {lang_filter} latest songs",
-            f"{artist_clean} {lang_filter} song",
+            f"{artist_clean} {lang_filter} latest songs official audio",
+            f"{artist_clean} {lang_filter} song official",
         ]
     else:
         search_queries = [
             f"{artist_clean} top hit songs official audio",
-            f"{artist_clean} latest songs",
-            f"{artist_clean} hit song",
+            f"{artist_clean} latest songs official audio",
+            f"{artist_clean} hit song official",
         ]
 
     tracks = []
     seen = set()
 
     for q in search_queries:
-        results = await youtube_service.search_youtube(q, max_results=20)
+        results = await youtube_service.search_youtube(q, max_results=20, filter_mode="song")
         for r in results:
             vid = r.get("video_id")
             if not vid or vid in seen:
                 continue
 
             dur = int(r.get("duration") or 0)
-            raw_title = (r.get("title") or r.get("track_name") or "").lower()
+            raw_title = (r.get("title") or r.get("track_name") or "")
+            uploader = r.get("artist") or r.get("uploader") or r.get("channel") or ""
 
-            # STRICT SINGLE SONG FILTER (exclude long compilations, jukeboxes, albums)
-            if dur > 450:  # > 7.5 minutes is not an individual song
-                continue
-            if dur < 30 and dur > 0:
-                continue
-            if any(k in raw_title for k in ["jukebox", "full album", "all songs in one", "non stop", "nonstop", "superhits collection", "top 10", "top 20", "top 30", "part 1", "part 2"]):
-                continue
-            if r.get("track_type") == "playlist":
+            # STRICT SINGLE SONG & OFFICIAL CHANNEL FILTER
+            # (exclude > 360s compilations, jukeboxes, albums, unofficial channels)
+            if not youtube_service.is_valid_single_song(r):
                 continue
 
             seen.add(vid)
@@ -213,6 +209,14 @@ async def get_artist_profile(
                 break
         if len(tracks) >= limit:
             break
+
+    # Sort tracks so verified official music sources rank highest
+    tracks.sort(
+        key=lambda t: youtube_service.is_official_music_source(
+            t.get("artist", "") or t.get("channel", ""), t.get("title", "")
+        ),
+        reverse=True
+    )
 
     if not matched_image and tracks:
         matched_image = tracks[0].get("thumbnail", "")

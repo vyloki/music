@@ -98,13 +98,14 @@ async def enrich_track(track: dict) -> dict:
 
 async def search_with_metadata(
     query: str,
-    max_results: int = 20
+    max_results: int = 20,
+    filter_mode: str = "song",
 ) -> List[dict]:
     """Search YouTube and ensure every track has clean artwork and metadata."""
     from app.services.youtube_service import search_youtube
 
-    # Get YouTube results immediately
-    tracks = await search_youtube(query, max_results)
+    # Get YouTube results immediately with official and duration filtering
+    tracks = await search_youtube(query, max_results, filter_mode=filter_mode)
 
     for track in tracks:
         if not track.get("album_art"):

@@ -11,6 +11,7 @@ from app.services.youtube_service import (
     search_youtube,
     get_video_info,
     get_youtube_suggestions,
+    is_valid_single_song,
 )
 from app.services.metadata_service import search_with_metadata, enrich_track
 from app.database import get_db
@@ -50,16 +51,18 @@ async def search(
     cache_key = f"search:{q}:{type}:{language}"
 
     # 1. Check in-memory L1 cache (instant O(1))
-    cached_l1 = search_l1_cache.get(f"search:{q}:{type}:{language}")
+    cached_l1 = search_l1_cache.get(cache_key)
     if cached_l1 is not None:
-        if isinstance(cached_l1, dict):
-            return cached_l1
-        return {
-            "query": q,
-            "results": cached_l1,
-            "total": len(cached_l1),
-            "cached": True,
-        }
+        c_tracks = cached_l1.get("results") if isinstance(cached_l1, dict) else cached_l1
+        if isinstance(c_tracks, list) and type == "song":
+            c_tracks = [t for t in c_tracks if is_valid_single_song(t)]
+        if c_tracks:
+            return {
+                "query": q,
+                "results": c_tracks,
+                "total": len(c_tracks),
+                "cached": True,
+            }
 
     # 2. Check MongoDB persistent cache
     if db is not None:
@@ -74,22 +77,26 @@ async def search(
                     "cached_at": {"$gt": datetime.now(timezone.utc).replace(hour=0, minute=0)}
                 })
             if cached and cached.get("results"):
-                search_l1_cache.set(cache_key, cached["results"], ttl=300.0)
-                return {
-                    "query": q,
-                    "results": cached["results"],
-                    "total": len(cached["results"]),
-                    "cached": True,
-                }
+                c_tracks = cached["results"]
+                if type == "song":
+                    c_tracks = [t for t in c_tracks if is_valid_single_song(t)]
+                if c_tracks:
+                    search_l1_cache.set(cache_key, c_tracks, ttl=300.0)
+                    return {
+                        "query": q,
+                        "results": c_tracks,
+                        "total": len(c_tracks),
+                        "cached": True,
+                    }
         except Exception as e:
             logger.debug(f"Search cache lookup skipped: {e}")
 
-    # 3. Perform search
+    # 3. Perform search with official & duration filtering
     search_q = f"{q} {language}".strip() if language and language.lower() not in q.lower() else q
     if enrich:
-        results = await search_with_metadata(search_q, limit)
+        results = await search_with_metadata(search_q, limit, filter_mode=type)
     else:
-        results = await search_youtube(search_q, limit)
+        results = await search_youtube(search_q, limit, filter_mode=type)
 
     tracks = results
     for t in tracks:
@@ -203,9 +210,10 @@ async def moods(
         return result
 
     target = next((m for m in MOOD_CATEGORIES if m["id"] == mood.lower()), None)
-    query = target["query"] if target else f"{mood} songs"
+    query = target["query"] if target else f"{mood} songs official audio"
 
-    tracks = await search_youtube(query, max_results=limit)
+    raw_tracks = await search_youtube(query, max_results=limit, filter_mode="song")
+    tracks = [t for t in raw_tracks if is_valid_single_song(t)]
     for t in tracks:
         vid = t.get("video_id") or t.get("id")
         if vid:

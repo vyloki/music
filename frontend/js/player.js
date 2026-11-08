@@ -1100,7 +1100,19 @@ const Player = {
                 }
 
                 const newTracks = data.tracks
-                    .filter(t => t && t.video_id && !existingIds.has(t.video_id))
+                    .filter(t => {
+                        if (!t || !t.video_id) return false;
+                        if (existingIds.has(t.video_id)) return false;
+                        // Single-song duration guardrail: reject > 360s (6 min) compilations and playlists
+                        const dur = parseInt(t.duration) || 0;
+                        if (dur > 360) return false;
+                        if (t.track_type === 'playlist') return false;
+                        const title = (t.title || t.track_name || '').toLowerCase();
+                        if (['jukebox', 'all songs', 'full album', 'full movie', 'movie scenes', 'compilation', 'non stop', 'nonstop'].some(k => title.includes(k))) {
+                            return false;
+                        }
+                        return true;
+                    })
                     .map(t => ({
                         ...t,
                         isAutoPlaySuggested: true,
