@@ -21,6 +21,7 @@ email-validator>=2.0.0
 
 # YouTube Audio Extraction
 yt-dlp>=2025.1.0
+imageio-ffmpeg>=0.5.0
 
 # HTTP Client (for external APIs)
 httpx>=0.28.0

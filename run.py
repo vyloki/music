@@ -15,6 +15,23 @@ from app.config import settings
 
 def main():
     """Start the Wave server."""
+    # Ensure FFmpeg is accessible in PATH for yt-dlp audio extraction
+    try:
+        import shutil
+        if not shutil.which("ffmpeg"):
+            import imageio_ffmpeg
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            ffmpeg_dir = os.path.dirname(ffmpeg_exe)
+            os.environ["PATH"] = f"{ffmpeg_dir}:{os.environ.get('PATH', '')}"
+            symlink_path = os.path.join(ffmpeg_dir, "ffmpeg")
+            if not os.path.exists(symlink_path):
+                try:
+                    os.symlink(ffmpeg_exe, symlink_path)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     default_port = "7860" if "SPACE_ID" in os.environ else str(settings.port)
     port = int(os.environ.get("PORT", default_port))
     host = os.environ.get("HOST", settings.host)
