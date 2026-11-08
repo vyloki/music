@@ -36,6 +36,7 @@ class PlaylistResponse(BaseModel):
     description: str = ""
     track_count: int = 0
     cover_url: str = ""
+    is_public: Optional[bool] = False
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -55,6 +56,7 @@ class HistoryEntry(BaseModel):
     title: str
     artist: str = ""
     thumbnail: str = ""
+    duration: Optional[int] = 0
     movie: Optional[str] = ""
     language: Optional[str] = ""
     subtitle: Optional[str] = ""

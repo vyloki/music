@@ -46,37 +46,59 @@ class Database:
             raise
 
     async def _create_indexes(self) -> None:
-        """Create database indexes for optimal query performance."""
-        try:
-            # Users collection indexes
-            await self.db.users.create_index("email", unique=True)
-            await self.db.users.create_index("username", unique=True)
+        """Create database indexes with per-index isolation and TTL expiration."""
+        index_definitions = [
+            # Users collection
+            ("users", "email", {"unique": True}),
+            ("users", "username", {"unique": True}),
 
-            # Playlists collection indexes
-            await self.db.playlists.create_index("user_id")
+            # Playlists collection
+            ("playlists", "user_id", {}),
 
-            # Listening history indexes
-            await self.db.listening_history.create_index(
-                [("user_id", 1), ("played_at", -1)]
-            )
+            # Listening history
+            ("listening_history", [("user_id", 1), ("played_at", -1)], {}),
+            ("listening_history", [("user_id", 1), ("video_id", 1)], {}),
 
-            # Song cache indexes
-            await self.db.song_cache.create_index("cached_at")
+            # Daily tracking
+            ("daily_tracking", [("user_id", 1), ("date", 1)], {}),
 
-            # Recommendation graph indexes
-            await self.db.recommendation_graph.create_index(
-                "track_id", unique=True
-            )
+            # Liked songs
+            ("liked_songs", [("user_id", 1), ("liked_at", -1)], {}),
+            ("liked_songs", [("user_id", 1), ("video_id", 1)], {}),
 
-            logger.info("✅ Database indexes created successfully")
+            # Recommendation graph
+            ("recommendation_graph", "track_id", {"unique": True}),
 
-        except Exception as e:
-            logger.warning(f"⚠️ Index creation warning: {e}")
+            # Link extraction history
+            ("link_history", [("user_id", 1), ("extracted_at", -1)], {}),
+
+            # Revoked tokens (for logout / token rotation)
+            ("revoked_tokens", "token", {"unique": True}),
+            ("revoked_tokens", "revoked_at", {"expireAfterSeconds": 86400 * 30}),
+
+            # TTL Caches: automatic pruning of expired entries
+            ("stream_cache", "expires_at", {"expireAfterSeconds": 0}),
+            ("search_cache", "cached_at", {"expireAfterSeconds": 86400 * 2}),
+            ("recommendation_cache", "cached_at", {"expireAfterSeconds": 86400}),
+            ("song_cache", "cached_at", {"expireAfterSeconds": 86400 * 7}),
+            ("lyrics_cache", "cached_at", {"expireAfterSeconds": 86400 * 30}),
+        ]
+
+        for coll_name, keys, kwargs in index_definitions:
+            try:
+                coll = self.db[coll_name]
+                await coll.create_index(keys, **kwargs)
+            except Exception as e:
+                logger.debug(f"Index creation note for {coll_name} ({keys}): {e}")
+
+        logger.info("✅ Database indexes verified and created")
 
     async def disconnect(self) -> None:
-        """Close the MongoDB connection."""
+        """Close the MongoDB connection cleanly."""
         if self.client:
             self.client.close()
+            self.client = None
+            self.db = None
             logger.info("🔌 Disconnected from MongoDB")
 
     def get_collection(self, name: str):

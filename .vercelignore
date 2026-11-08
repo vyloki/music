@@ -1,0 +1,17 @@
+.git
+.github
+.agents
+AGENTS.md
+venv
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+node_modules
+ios
+capacitor.config.json
+Dockerfile
+render.yaml
+.env
+

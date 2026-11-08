@@ -239,6 +239,21 @@ const Library = {
         lucide.createIcons({ nodes: [container] });
     },
 
+    playHistoryTrack(index) {
+        if (this.historyTracks && this.historyTracks[index]) {
+            const item = this.historyTracks[index];
+            const meta = typeof getTrackMetadata === 'function' ? getTrackMetadata(item) : { title: item.title, artist: item.artist };
+            if (typeof playSingleTrack === 'function') {
+                playSingleTrack(item.video_id, {
+                    video_id: item.video_id,
+                    title: meta.title || item.title,
+                    artist: meta.artist || item.artist,
+                    thumbnail: item.thumbnail
+                });
+            }
+        }
+    },
+
     async renderHistoryTab(container) {
         try {
             const data = await API.get('/api/history?limit=40');
@@ -254,7 +269,7 @@ const Library = {
                             const meta = typeof getTrackMetadata === 'function' ? getTrackMetadata(item) : { title: item.title, movie: '', language: '', artist: item.artist, subtitle: item.artist };
                             const sub = meta.movie ? (meta.language ? `${meta.movie} • ${meta.language}` : meta.movie) : (meta.language ? `${meta.artist} • ${meta.language}` : meta.artist);
                             return `
-                            <div class="track-row" onclick="playSingleTrack('${item.video_id}', { video_id: '${item.video_id}', title: '${escapeHtml(meta.title)}', artist: '${escapeHtml(sub)}', thumbnail: '${item.thumbnail}' })">
+                            <div class="track-row" onclick="Library.playHistoryTrack(${i})">
                                 <div class="track-row-art">
                                     <img src="${item.thumbnail || ''}" alt="" onerror="this.style.display='none'">
                                 </div>
@@ -263,7 +278,7 @@ const Library = {
                                     <div class="track-row-artist">${escapeHtml(sub)}</div>
                                 </div>
                                 <div class="track-row-duration">
-                                    <button class="btn-icon" onclick="event.stopPropagation(); playSingleTrack('${item.video_id}', { video_id: '${item.video_id}', title: '${escapeHtml(meta.title)}', artist: '${escapeHtml(sub)}', thumbnail: '${item.thumbnail}' })" title="Play">
+                                    <button class="btn-icon" onclick="event.stopPropagation(); Library.playHistoryTrack(${i})" title="Play">
                                         <i data-lucide="play"></i>
                                     </button>
                                 </div>

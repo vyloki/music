@@ -27,12 +27,16 @@ async def get_song_languages(
     """
     cache_key = f"langver_{video_id}"
 
-    # Check cache
+    # Check cache (1 hour expiry)
     if db is not None:
         try:
-            cached = await db.song_cache.find_one({"_id": cache_key})
+            from datetime import datetime, timezone, timedelta
+            cached = await db.song_cache.find_one({
+                "_id": cache_key,
+                "cached_at": {"$gt": datetime.now(timezone.utc) - timedelta(hours=1)}
+            })
             if cached and cached.get("versions"):
-                logger.info(f"📦 Language versions cache hit: {video_id}")
+                logger.debug(f"📦 Language versions cache hit: {video_id}")
                 return {"video_id": video_id, "versions": cached["versions"]}
         except Exception:
             pass

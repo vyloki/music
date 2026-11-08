@@ -3,7 +3,7 @@ Wave - Listening History Routes
 Track what the user listens to with MongoDB storage and optional authentication.
 """
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from app.database import get_db
 from app.utils.security import get_optional_user
 from app.models.playlist import HistoryEntry
@@ -15,31 +15,55 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/history", tags=["History"])
 
 
+async def _record_history(db, user_id: ObjectId, data: HistoryEntry) -> None:
+    """Offload document insertion and daily tracking updates to background task."""
+    try:
+        now = datetime.now(timezone.utc)
+        doc = {
+            "user_id": user_id,
+            "video_id": data.video_id,
+            "title": data.title,
+            "artist": data.artist,
+            "thumbnail": data.thumbnail,
+            "duration": getattr(data, "duration", 0) or 0,
+            "movie": data.movie or "",
+            "language": data.language or "",
+            "subtitle": data.subtitle or "",
+            "played_at": now,
+        }
+        await db.listening_history.insert_one(doc)
+
+        # Update daily tracking
+        today_str = now.strftime("%Y-%m-%d")
+        try:
+            await db.daily_tracking.update_one(
+                {"user_id": user_id, "date": today_str},
+                {
+                    "$inc": {"play_count": 1},
+                    "$set": {"last_played": now},
+                    "$setOnInsert": {"user_id": user_id, "date": today_str},
+                },
+                upsert=True,
+            )
+        except Exception as te:
+            logger.debug(f"Daily tracking update note: {te}")
+    except Exception as e:
+        logger.debug(f"History background record error: {e}")
+
+
 @router.post("", summary="Record a play event")
 async def record_play(
     data: HistoryEntry,
+    background_tasks: BackgroundTasks,
     user: dict = Depends(get_optional_user),
     db=Depends(get_db),
 ):
     """Record that a track was played. Works for both authenticated users and guests."""
     if user and db is not None:
-        try:
-            doc = {
-                "user_id": ObjectId(user["_id"]),
-                "video_id": data.video_id,
-                "title": data.title,
-                "artist": data.artist,
-                "thumbnail": data.thumbnail,
-                "movie": data.movie or "",
-                "language": data.language or "",
-                "subtitle": data.subtitle or "",
-                "played_at": datetime.now(timezone.utc),
-            }
-            await db.listening_history.insert_one(doc)
-        except Exception as e:
-            logger.debug(f"History insert error: {e}")
+        user_id = ObjectId(user["_id"]) if ObjectId.is_valid(user["_id"]) else user["_id"]
+        background_tasks.add_task(_record_history, db, user_id, data)
 
-    return {"message": "Play recorded"}
+    return {"status": "recorded"}
 
 
 @router.get("", summary="Get recent listening history")
@@ -53,26 +77,41 @@ async def get_history(
         return {"history": []}
 
     try:
-        cursor = db.listening_history.find(
-            {"user_id": ObjectId(user["_id"])},
-        ).sort("played_at", -1).limit(limit)
+        user_id = ObjectId(user["_id"]) if ObjectId.is_valid(user["_id"]) else user["_id"]
+        pipeline = [
+            {"$match": {"user_id": user_id}},
+            {"$sort": {"played_at": -1}},
+            {
+                "$group": {
+                    "_id": "$video_id",
+                    "played_at": {"$first": "$played_at"},
+                    "title": {"$first": "$title"},
+                    "artist": {"$first": "$artist"},
+                    "thumbnail": {"$first": "$thumbnail"},
+                    "duration": {"$first": "$duration"},
+                    "movie": {"$first": "$movie"},
+                    "language": {"$first": "$language"},
+                    "subtitle": {"$first": "$subtitle"},
+                }
+            },
+            {"$sort": {"played_at": -1}},
+            {"$limit": limit},
+        ]
 
+        cursor = db.listening_history.aggregate(pipeline)
         history = []
-        seen = set()
         async for doc in cursor:
-            vid = doc["video_id"]
-            if vid not in seen:
-                seen.add(vid)
-                history.append({
-                    "video_id": vid,
-                    "title": doc.get("title", ""),
-                    "artist": doc.get("artist", ""),
-                    "thumbnail": doc.get("thumbnail", ""),
-                    "movie": doc.get("movie", ""),
-                    "language": doc.get("language", ""),
-                    "subtitle": doc.get("subtitle", ""),
-                    "played_at": doc.get("played_at"),
-                })
+            history.append({
+                "video_id": doc["_id"],
+                "title": doc.get("title", ""),
+                "artist": doc.get("artist", ""),
+                "thumbnail": doc.get("thumbnail", ""),
+                "duration": doc.get("duration", 0) or 0,
+                "movie": doc.get("movie", ""),
+                "language": doc.get("language", ""),
+                "subtitle": doc.get("subtitle", ""),
+                "played_at": doc.get("played_at"),
+            })
 
         return {"history": history}
     except Exception as e:
@@ -91,19 +130,25 @@ async def get_top(
         return {"tracks": []}
 
     try:
+        user_id = ObjectId(user["_id"]) if ObjectId.is_valid(user["_id"]) else user["_id"]
         pipeline = [
-            {"$match": {"user_id": ObjectId(user["_id"])}},
+            {"$match": {"user_id": user_id}},
+            {"$sort": {"played_at": -1}},
             {
                 "$group": {
                     "_id": "$video_id",
                     "title": {"$first": "$title"},
                     "artist": {"$first": "$artist"},
                     "thumbnail": {"$first": "$thumbnail"},
+                    "duration": {"$first": "$duration"},
+                    "movie": {"$first": "$movie"},
+                    "language": {"$first": "$language"},
+                    "subtitle": {"$first": "$subtitle"},
                     "play_count": {"$sum": 1},
                     "last_played": {"$max": "$played_at"},
                 }
             },
-            {"$sort": {"play_count": -1}},
+            {"$sort": {"play_count": -1, "last_played": -1}},
             {"$limit": limit},
         ]
         cursor = db.listening_history.aggregate(pipeline)
@@ -114,6 +159,7 @@ async def get_top(
                 "title": doc.get("title", ""),
                 "artist": doc.get("artist", ""),
                 "thumbnail": doc.get("thumbnail", ""),
+                "duration": doc.get("duration", 0) or 0,
                 "movie": doc.get("movie", ""),
                 "language": doc.get("language", ""),
                 "subtitle": doc.get("subtitle", ""),
@@ -134,9 +180,9 @@ async def clear_history(
     """Clear the user's entire listening history."""
     if user and db is not None:
         try:
-            await db.listening_history.delete_many(
-                {"user_id": ObjectId(user["_id"])}
-            )
+            user_id = ObjectId(user["_id"]) if ObjectId.is_valid(user["_id"]) else user["_id"]
+            await db.listening_history.delete_many({"user_id": user_id})
+            await db.daily_tracking.delete_many({"user_id": user_id})
         except Exception:
             pass
     return {"message": "History cleared"}

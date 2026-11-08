@@ -118,7 +118,7 @@ async def extract_from_url(
             logger.warning(f"Extraction error for {clean_url}: {e}")
             return {"_error": f"Extraction failed: {str(e)}"}
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     info = await loop.run_in_executor(None, _run_ytdlp)
 
     if not info or info.get("_error"):
@@ -357,7 +357,8 @@ async def save_extraction_history(
 
 async def get_extraction_history(
     user_id: Optional[str] = None,
-    limit: int = 20
+    limit: int = 20,
+    projection: Optional[dict] = None,
 ) -> List[dict]:
     """Retrieve extraction history for a user."""
     db = database.db
@@ -366,11 +367,15 @@ async def get_extraction_history(
 
     try:
         query = {"user_id": user_id} if user_id else {"session_id": "guest"}
-        cursor = db.link_history.find(query).sort("extracted_at", -1).limit(limit)
+        cursor = db.link_history.find(query, projection).sort("extracted_at", -1).limit(limit)
         items = await cursor.to_list(limit)
 
         result = []
         for item in items:
+            track = item.get("track")
+            if isinstance(track, dict):
+                # Omit any large format metadata or raw payloads from history listing
+                track = {k: v for k, v in track.items() if k not in ("formats", "raw_info", "thumbnails")}
             result.append({
                 "id": str(item.get("_id")),
                 "url": item.get("url"),
@@ -382,7 +387,7 @@ async def get_extraction_history(
                 "duration": item.get("duration", 0),
                 "platform": item.get("platform", "Web Link"),
                 "mode": item.get("mode", "same"),
-                "track": item.get("track"),
+                "track": track,
                 "extracted_at": item.get("extracted_at").isoformat() if item.get("extracted_at") else "",
             })
         return result

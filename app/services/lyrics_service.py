@@ -9,7 +9,11 @@ import httpx
 import logging
 from typing import Optional, List, Dict
 import re
+import asyncio
+from datetime import datetime, timezone, timedelta
 from app.utils.transliterator import transliterate_indic_to_english
+from app.services.http_client import get_http_client
+from app.database import database
 
 logger = logging.getLogger(__name__)
 LRCLIB_BASE = "https://lrclib.net/api"
@@ -212,69 +216,120 @@ async def get_lyrics(
     album_name: str = "",
     duration: int = 0,
     language: str = "",
+    video_id: str = "",
 ) -> Optional[dict]:
     """
     Fetch lyrics from LRCLIB using smart multi-tier query fallback.
     Language-aware, script-filtering, duration-aware, and album-aware.
     Automatically transliterates Telugu/Indic lyrics to English spelling.
+    Negative-caches queries that yield no lyrics to avoid repeated scraping for instrumentals.
     """
+    db = database.db
+    cache_id = f"{video_id}_{language.lower()}" if (video_id and language) else (video_id or "")
+
+    # Check negative cache in database
+    if db is not None and cache_id:
+        try:
+            cached = await db.lyrics_cache.find_one({"_id": cache_id})
+            if cached and cached.get("found") is False:
+                cached_at = cached.get("cached_at")
+                if cached_at:
+                    if cached_at.tzinfo is None:
+                        cached_at = cached_at.replace(tzinfo=timezone.utc)
+                    if datetime.now(timezone.utc) - cached_at < timedelta(hours=24):
+                        logger.info(f"🛑 Negative cache hit for '{track_name}' ({cache_id}) — skipping scrape")
+                        return None
+        except Exception as e:
+            logger.debug(f"Negative cache check error: {e}")
+
     queries = clean_song_titles(track_name, artist_name, album_name, language)
     logger.info(f"🔍 Searching lyrics for '{track_name}' (album={album_name!r}, dur={duration}s, lang={language!r}) with candidates: {queries}")
 
+    client = get_http_client()
     all_scored = []
+
+    async def _fetch_query(q: str):
+        try:
+            resp = await client.get(
+                f"{LRCLIB_BASE}/search",
+                params={"q": q},
+                timeout=6.0,
+            )
+            if resp.status_code == 200:
+                results = resp.json()
+                if results and isinstance(results, list):
+                    return (q, results)
+        except Exception as e:
+            logger.debug(f"LRCLIB search error for query '{q}': {e}")
+        return (q, [])
+
     try:
-        async with httpx.AsyncClient(timeout=6.0) as client:
-            for q in queries:
-                resp = await client.get(
-                    f"{LRCLIB_BASE}/search",
-                    params={"q": q}
-                )
+        query_results = await asyncio.gather(
+            *[_fetch_query(q) for q in queries],
+            return_exceptions=True
+        )
 
-                if resp.status_code == 200:
-                    results = resp.json()
-                    if results and isinstance(results, list):
-                        for r in results:
-                            lang_score = _score_result_for_language(r, language, album_name)
-                            if lang_score <= -500:
-                                # Foreign script disqualified
-                                continue
+        for item in query_results:
+            if isinstance(item, Exception):
+                continue
+            q, results = item
+            for r in results:
+                lang_score = _score_result_for_language(r, language, album_name)
+                if lang_score <= -500:
+                    # Foreign script disqualified
+                    continue
 
-                            has_synced = bool(r.get("syncedLyrics"))
+                has_synced = bool(r.get("syncedLyrics"))
 
-                            # Calculate duration proximity score
-                            dur_score = 0
-                            r_dur = float(r.get("duration") or 0)
-                            if duration > 0 and r_dur > 0:
-                                diff = abs(r_dur - float(duration))
-                                if diff <= 4:
-                                    dur_score = 30  # Exact or near-exact song length match
-                                elif diff <= 12:
-                                    dur_score = 15
-                                elif diff <= 25:
-                                    dur_score = 5
-                                elif diff > 45:
-                                    dur_score = -25 # Mismatched edit/remix
+                # Calculate duration proximity score
+                dur_score = 0
+                r_dur = float(r.get("duration") or 0)
+                if duration > 0 and r_dur > 0:
+                    diff = abs(r_dur - float(duration))
+                    if diff <= 4:
+                        dur_score = 30  # Exact or near-exact song length match
+                    elif diff <= 12:
+                        dur_score = 15
+                    elif diff <= 25:
+                        dur_score = 5
+                    elif diff > 45:
+                        dur_score = -25  # Mismatched edit/remix
 
-                            total_score = lang_score + (25 if has_synced else 0) + dur_score
-                            all_scored.append((total_score, has_synced, dur_score, r, q))
+                total_score = lang_score + (25 if has_synced else 0) + dur_score
+                all_scored.append((total_score, has_synced, dur_score, r, q))
 
-                        # If we matched high-confidence language/duration candidates in this query, stop querying
-                        if any(s[0] >= 35 for s in all_scored):
-                            break
-
-            if all_scored:
-                all_scored.sort(key=lambda x: x[0], reverse=True)
-                for total_score, has_synced, dur_score, r, q in all_scored:
-                    parsed = _parse_lyrics_response(r)
-                    if parsed and (parsed["synced_lyrics"] or parsed["plain_lyrics"]):
-                        logger.info(
-                            f"🎤 Selected lyrics for '{track_name}' (query='{q}', score={total_score}, dur_score={dur_score}): "
-                            f"{r.get('trackName')} by {r.get('artistName')}"
-                        )
-                        return parsed
+        if all_scored:
+            all_scored.sort(key=lambda x: x[0], reverse=True)
+            for total_score, has_synced, dur_score, r, q in all_scored:
+                parsed = _parse_lyrics_response(r)
+                if parsed and (parsed["synced_lyrics"] or parsed["plain_lyrics"]):
+                    logger.info(
+                        f"🎤 Selected lyrics for '{track_name}' (query='{q}', score={total_score}, dur_score={dur_score}): "
+                        f"{r.get('trackName')} by {r.get('artistName')}"
+                    )
+                    return parsed
 
     except Exception as e:
         logger.warning(f"Lyrics search error for '{track_name}': {e}")
+
+    # Negative Caching: If no lyrics are found after all sources are checked, cache in db.lyrics_cache with 24-hr TTL
+    if db is not None and cache_id:
+        try:
+            await db.lyrics_cache.update_one(
+                {"_id": cache_id},
+                {
+                    "$set": {
+                        "lyrics": None,
+                        "synced": False,
+                        "found": False,
+                        "cached_at": datetime.now(timezone.utc),
+                    }
+                },
+                upsert=True
+            )
+            logger.info(f"🛑 Negative cached (no lyrics found) for '{track_name}' ({cache_id}) with 24-hr TTL")
+        except Exception as e:
+            logger.debug(f"Failed to record negative lyrics cache: {e}")
 
     return None
 
@@ -334,3 +389,11 @@ def _parse_lrc(lrc_text: str) -> List[Dict]:
                 })
 
     return lines
+
+
+class LyricsService:
+    """Service namespace for lyrics retrieval, normalization, and caching."""
+
+    get_lyrics = staticmethod(get_lyrics)
+    clean_song_titles = staticmethod(clean_song_titles)
+

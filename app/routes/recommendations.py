@@ -2,10 +2,11 @@
 Wave - Recommendations & Trending Routes
 """
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, BackgroundTasks
 from app.services.recommendation_service import (
     get_trending_tracks,
     get_personalized_home_feed,
+    get_home_feed,
     get_song_radio,
     get_next_recommendation,
     record_co_listen,
@@ -40,14 +41,14 @@ async def trending(
 async def feed(user=Depends(get_optional_user)):
     """Get multi-section home feed with time-of-day intelligence."""
     user_id = str(user["_id"]) if user and "_id" in user else None
-    return await get_personalized_home_feed(user_id)
+    return await get_home_feed(user_id)
 
 
 @router.get("/contextual", summary="Get current time-of-day and mood context")
 async def contextual(user=Depends(get_optional_user)):
     """Get time-of-day greeting, mood profile, and contextual tracks."""
     user_id = str(user["_id"]) if user and "_id" in user else None
-    return await get_personalized_home_feed(user_id)
+    return await get_home_feed(user_id)
 
 
 @router.get("/radio", summary="Get endless smart song radio recommendations")
@@ -94,10 +95,11 @@ async def next_song(
 
 @router.post("/transition", summary="Record track transition")
 async def transition(
+    background_tasks: BackgroundTasks,
     from_id: str = Query(..., description="Previous track video ID"),
     to_id: str = Query(..., description="Next track video ID"),
     user=Depends(get_optional_user),
 ):
     """Record that a user transitioned from track A to track B to build the graph."""
-    await record_co_listen(from_id, to_id)
+    background_tasks.add_task(record_co_listen, from_id, to_id)
     return {"status": "recorded"}

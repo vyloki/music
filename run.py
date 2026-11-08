@@ -8,6 +8,7 @@ Usage:
 """
 
 import os
+import sys
 import uvicorn
 from app.config import settings
 
@@ -16,7 +17,7 @@ def main():
     """Start the Wave server."""
     port = int(os.environ.get("PORT", str(settings.port)))
     host = os.environ.get("HOST", settings.host)
-    debug = os.environ.get("DEBUG", "false").lower() in ("1", "true", "yes")
+    debug = settings.debug if "DEBUG" not in os.environ else os.environ.get("DEBUG", "false").lower() in ("1", "true", "yes")
 
     print()
     print("  🎵  W A V E  ")
@@ -28,13 +29,20 @@ def main():
     print(f"  📚  http://{host}:{port}/docs")
     print()
 
-    uvicorn.run(
-        "app.main:app",
-        host=host,
-        port=port,
-        reload=debug,
-        log_level="debug" if debug else "info",
-    )
+    try:
+        uvicorn.run(
+            "app.main:app",
+            host=host,
+            port=port,
+            reload=debug,
+            log_level="debug" if debug else "info",
+        )
+    except KeyboardInterrupt:
+        print("\n👋 Wave server stopped by user (Ctrl+C).")
+        try:
+            sys.exit(0)
+        except SystemExit:
+            pass
 
 
 if __name__ == "__main__":

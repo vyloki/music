@@ -4,7 +4,7 @@ Loads settings from .env file using Pydantic Settings.
 """
 
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, AliasChoices
 from typing import List
 
 
@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     # JWT Authentication
     jwt_secret_key: str = Field(
         default="change-this-secret-key",
-        alias="JWT_SECRET_KEY"
+        validation_alias=AliasChoices("JWT_SECRET_KEY", "JWT_SECRET")
     )
     jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
     jwt_access_token_expire_minutes: int = Field(

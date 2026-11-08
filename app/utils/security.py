@@ -3,32 +3,61 @@ Wave - Security Utilities
 Password hashing (bcrypt), JWT token creation/validation, and auth dependencies.
 """
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import JWTError, jwt
-from passlib.context import CryptContext
+import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.config import settings
 from app.database import get_db
+from app.utils.db import to_object_id
 from bson import ObjectId
 import logging
 
 logger = logging.getLogger(__name__)
 
-# --- Password Hashing ---
+# --- Password Hashing (Direct native bcrypt for Python 3.13 compatibility) ---
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+def _hash_worker(password: str) -> str:
+    """Worker function for bcrypt hashing with rounds=11."""
+    pwd_bytes = password.encode("utf-8")
+    if len(pwd_bytes) > 72:
+        raise ValueError("Password cannot exceed 72 bytes")
+    salt = bcrypt.gensalt(rounds=11)
+    return bcrypt.hashpw(pwd_bytes, salt).decode("utf-8")
+
+
+def _verify_worker(plain_password: str, hashed_password: str) -> bool:
+    """Worker function for bcrypt verification."""
+    try:
+        pwd_bytes = plain_password.encode("utf-8")
+        if len(pwd_bytes) > 72:
+            return False
+        return bcrypt.checkpw(pwd_bytes, hashed_password.encode("utf-8"))
+    except Exception:
+        return False
 
 
 def hash_password(password: str) -> str:
-    """Hash a password using bcrypt."""
-    return pwd_context.hash(password)
+    """Hash a password using bcrypt (synchronous)."""
+    return _hash_worker(password)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a plaintext password against a bcrypt hash."""
-    return pwd_context.verify(plain_password, hashed_password)
+    """Verify a plaintext password against a bcrypt hash (synchronous)."""
+    return _verify_worker(plain_password, hashed_password)
+
+
+async def hash_password_async(password: str) -> str:
+    """Hash a password asynchronously using asyncio.to_thread to avoid blocking the event loop."""
+    return await asyncio.to_thread(_hash_worker, password)
+
+
+async def verify_password_async(plain_password: str, hashed_password: str) -> bool:
+    """Verify a plaintext password asynchronously using asyncio.to_thread."""
+    return await asyncio.to_thread(_verify_worker, plain_password, hashed_password)
 
 
 # --- JWT Token Management ---
@@ -135,14 +164,20 @@ async def get_current_user(
         )
 
     user_id = payload.get("sub")
-    if not user_id:
+    if not user_id or not ObjectId.is_valid(user_id):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token payload",
         )
 
+    if db is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service unavailable",
+        )
+
     # Fetch user from database
-    user = await db.users.find_one({"_id": ObjectId(user_id)})
+    user = await db.users.find_one({"_id": ObjectId(user_id)}, {"password_hash": 0})
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

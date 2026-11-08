@@ -12,6 +12,7 @@ from typing import List, Dict, Optional, Any
 from datetime import datetime, timezone, timedelta
 from app.database import database
 from app.services.youtube_service import search_youtube, get_related_videos
+from app.utils.cache import home_feed_cache
 import logging
 import asyncio
 import re
@@ -168,12 +169,12 @@ async def get_song_radio(
                 edges = sorted(node["edges"], key=lambda x: x.get("weight", 0), reverse=True)[:5]
                 target_ids = [e["target"] for e in edges]
                 tracks = []
-                for tid in target_ids:
-                    doc = await db.song_cache.find_one({"_id": tid})
-                    if doc:
-                        doc.pop("_id", None)
-                        doc["video_id"] = tid
-                        tracks.append(doc)
+                cursor = db.song_cache.find({"_id": {"$in": target_ids}})
+                docs = await cursor.to_list(length=len(target_ids))
+                for doc in docs:
+                    tid = doc.pop("_id", None)
+                    doc["video_id"] = tid
+                    tracks.append(doc)
                 return tracks
         except Exception:
             pass
@@ -295,6 +296,11 @@ async def get_personalized_home_feed(user_id: Optional[str] = None) -> dict:
       - trending: Global trending hits.
       - categories: Browse categories.
     """
+    cache_key = f"home_feed:{user_id or 'anon'}"
+    cached = home_feed_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     time_ctx = get_time_of_day_context()
     db = database.db
 
@@ -304,23 +310,35 @@ async def get_personalized_home_feed(user_id: Optional[str] = None) -> dict:
     top_artist = ""
     if user_id and db is not None:
         try:
-            user_doc = await db.users.find_one({"_id": user_id})
-            history = await db.user_history.find({"user_id": user_id}).sort("played_at", -1).limit(20).to_list(20)
-            if history:
-                lang_counts = {}
-                artist_counts = {}
-                for h in history:
-                    l = h.get("language")
-                    if l:
-                        lang_counts[l] = lang_counts.get(l, 0) + 1
-                    a = h.get("artist")
-                    if a and a.lower() not in ["unknown", "wave music", ""]:
-                        artist_counts[a] = artist_counts.get(a, 0) + 1
+            from bson import ObjectId
+            user_obj_id = ObjectId(user_id) if ObjectId.is_valid(user_id) else None
+            if user_obj_id:
+                user_doc = await db.users.find_one({"_id": user_obj_id})
+                if user_doc and user_doc.get("settings", {}).get("language_preference"):
+                    prefs = user_doc["settings"]["language_preference"]
+                    if prefs and isinstance(prefs, list):
+                        preferred_lang = prefs[0]
 
-                if lang_counts:
-                    preferred_lang = max(lang_counts.keys(), key=lambda k: lang_counts[k])
-                if artist_counts:
-                    top_artist = max(artist_counts.keys(), key=lambda k: artist_counts[k])
+                # Query listening_history collection with user ObjectId
+                cursor = db.listening_history.find(
+                    {"user_id": user_obj_id}
+                ).sort("played_at", -1).limit(20)
+                history = await cursor.to_list(length=20)
+                if history:
+                    lang_counts = {}
+                    artist_counts = {}
+                    for h in history:
+                        l = h.get("language")
+                        if l:
+                            lang_counts[l] = lang_counts.get(l, 0) + 1
+                        a = h.get("artist")
+                        if a and a.lower() not in ["unknown", "wave music", ""]:
+                            artist_counts[a] = artist_counts.get(a, 0) + 1
+
+                    if lang_counts:
+                        preferred_lang = max(lang_counts.keys(), key=lambda k: lang_counts[k])
+                    if artist_counts:
+                        top_artist = max(artist_counts.keys(), key=lambda k: artist_counts[k])
         except Exception as e:
             logger.debug(f"User profile inference error: {e}")
 
@@ -349,7 +367,7 @@ async def get_personalized_home_feed(user_id: Optional[str] = None) -> dict:
     english_tracks = results[5] if isinstance(results[5], list) else []
     lofi_tracks = results[6] if isinstance(results[6], list) else []
 
-    return {
+    feed_data = {
         "time_context": time_ctx,
         "mood_mix": mood_tracks,
         "for_you": for_you_tracks,
@@ -361,6 +379,8 @@ async def get_personalized_home_feed(user_id: Optional[str] = None) -> dict:
         "categories": CATEGORIES,
         "preferred_language": preferred_lang,
     }
+    home_feed_cache.set(cache_key, feed_data, ttl=600.0)
+    return feed_data
 
 
 # =====================================================================
@@ -406,9 +426,20 @@ async def get_trending_tracks(category: str = "trending", limit: int = 15) -> Li
     return tracks
 
 
-async def get_home_feed() -> Dict[str, Any]:
-    """Fetch sections for the home feed."""
-    return await get_personalized_home_feed(None)
+async def get_home_feed(user_id: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Fetch sections for the home feed with Stale-While-Revalidate (SWR) caching.
+    Check home_feed_cache.get(cache_key); if present, return it immediately.
+    """
+    cache_key = f"home_feed:{user_id or 'anon'}"
+    cached = home_feed_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    feed_data = await get_personalized_home_feed(user_id)
+    if feed_data:
+        home_feed_cache.set(cache_key, feed_data, ttl=600.0)
+    return feed_data
 
 
 async def record_co_listen(track_a_id: str, track_b_id: str) -> None:
@@ -447,3 +478,16 @@ async def get_next_recommendation(current_video_id: str) -> Optional[dict]:
     if tracks:
         return tracks[0]
     return None
+
+
+class RecommendationService:
+    """Service namespace for recommendation algorithms and feeds."""
+
+    get_time_of_day_context = staticmethod(get_time_of_day_context)
+    get_song_radio = staticmethod(get_song_radio)
+    get_personalized_home_feed = staticmethod(get_personalized_home_feed)
+    get_trending_tracks = staticmethod(get_trending_tracks)
+    get_home_feed = staticmethod(get_home_feed)
+    record_co_listen = staticmethod(record_co_listen)
+    get_next_recommendation = staticmethod(get_next_recommendation)
+

@@ -1,33 +1,22 @@
 """
-Wave - Background Tasks (Celery/Redis optional)
-=================================================
-Currently uses asyncio.gather + FastAPI BackgroundTasks for in-process concurrency.
-To scale to multiple workers, install Redis and Celery (commented out below).
-
-Quick setup for production:
-    pip install celery[redis] redis
-    redis-server &
-    celery -A app.tasks worker --loglevel=info
-
-Enable by uncommenting the Celery sections below and setting REDIS_URL in .env
+Wave - Background Tasks
+In-process background task tracking with GC protection and graceful shutdown.
 """
 
 import asyncio
 import logging
-from typing import Callable, Any
+from typing import Callable, Set
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-# ============================================================
-# In-process background task queue (no Redis needed)
-# ============================================================
-
-_task_queue = asyncio.Queue()
+# Strong reference set to prevent garbage collection of running tasks
+_active_background_tasks: Set[asyncio.Task] = set()
 
 
 async def run_background(coro_fn: Callable, *args, **kwargs) -> None:
     """
-    Fire-and-forget: schedule an async coroutine to run in the background.
+    Fire-and-forget: schedule an async coroutine with GC protection.
     Does not block the caller.
     """
     async def _wrapper():
@@ -36,17 +25,24 @@ async def run_background(coro_fn: Callable, *args, **kwargs) -> None:
         except Exception as e:
             logger.warning(f"Background task error [{coro_fn.__name__}]: {e}")
 
-    asyncio.create_task(_wrapper())
+    task = asyncio.create_task(_wrapper())
+    _active_background_tasks.add(task)
+    task.add_done_callback(_active_background_tasks.discard)
 
 
-# ============================================================
-# Common background task definitions
-# ============================================================
+async def shutdown_background_tasks(timeout: float = 3.0) -> None:
+    """Drain background tasks during server shutdown."""
+    if not _active_background_tasks:
+        return
+    logger.info(f"⏳ Waiting for {len(_active_background_tasks)} background task(s) to finish...")
+    done, pending = await asyncio.wait(_active_background_tasks, timeout=timeout)
+    for t in pending:
+        t.cancel()
+
 
 async def prefetch_lyrics(video_id: str, title: str, artist: str, language: str, db) -> None:
     """Pre-warm lyrics cache for a track after it starts playing."""
     from app.services.lyrics_service import get_lyrics
-    from datetime import datetime, timezone
 
     if db is None:
         return
@@ -64,7 +60,7 @@ async def prefetch_lyrics(video_id: str, title: str, artist: str, language: str,
                 {"$set": {**result, "cached_at": datetime.now(timezone.utc)}},
                 upsert=True,
             )
-            logger.info(f"🎤 Pre-warmed lyrics cache for {video_id} ({language})")
+            logger.debug(f"🎤 Pre-warmed lyrics cache for {video_id} ({language})")
         except Exception as e:
             logger.debug(f"Lyrics prefetch cache write failed: {e}")
 
@@ -76,33 +72,15 @@ async def warm_artist_cache(artist_name: str, language: str, db) -> None:
     query = f"{artist_name} {language} songs".strip()
     try:
         tracks = await search_youtube(query, max_results=10)
-        logger.info(f"🎸 Pre-warmed {len(tracks)} tracks for artist '{artist_name}' ({language})")
+        if db is not None and tracks:
+            for t in tracks:
+                vid = t.get("video_id")
+                if vid:
+                    await db.song_cache.update_one(
+                        {"_id": vid},
+                        {"$set": {**t, "cached_at": datetime.now(timezone.utc)}},
+                        upsert=True,
+                    )
+        logger.debug(f"🎸 Pre-warmed and cached {len(tracks)} tracks for artist '{artist_name}' ({language})")
     except Exception as e:
         logger.debug(f"Artist cache warm failed for {artist_name}: {e}")
-
-
-# ============================================================
-# Optional: Celery Integration (uncomment to enable)
-# ============================================================
-# import os
-# from celery import Celery
-#
-# REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-# celery_app = Celery("wave", broker=REDIS_URL, backend=REDIS_URL)
-# celery_app.conf.update(
-#     task_serializer="json",
-#     result_serializer="json",
-#     accept_content=["json"],
-#     timezone="UTC",
-#     enable_utc=True,
-# )
-#
-# @celery_app.task(name="wave.prefetch_lyrics")
-# def celery_prefetch_lyrics(video_id, title, artist, language):
-#     import asyncio
-#     asyncio.run(prefetch_lyrics(video_id, title, artist, language, db=None))
-#
-# @celery_app.task(name="wave.warm_artist_cache")
-# def celery_warm_artist_cache(artist_name, language):
-#     import asyncio
-#     asyncio.run(warm_artist_cache(artist_name, language, db=None))

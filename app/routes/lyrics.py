@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Query
 from app.services.lyrics_service import get_lyrics
 from app.utils.security import get_optional_user
 from app.database import get_db
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import logging
 
 logger = logging.getLogger(__name__)
@@ -37,14 +37,30 @@ async def fetch_lyrics(
         try:
             cached = await db.lyrics_cache.find_one({"_id": cache_id})
             if cached:
-                logger.info(f"📦 Lyrics cache hit: {cache_id}")
-                return {
-                    "video_id": video_id,
-                    "synced": cached.get("synced_lyrics", []),
-                    "plain": cached.get("plain_lyrics", ""),
-                    "has_synced": len(cached.get("synced_lyrics", [])) > 0,
-                    "source": cached.get("source", "cache"),
-                }
+                if cached.get("found") is False:
+                    # Negative cache hit within 24 hours
+                    cached_at = cached.get("cached_at")
+                    if cached_at:
+                        if cached_at.tzinfo is None:
+                            cached_at = cached_at.replace(tzinfo=timezone.utc)
+                        if datetime.now(timezone.utc) - cached_at < timedelta(hours=24):
+                            logger.info(f"📦 Lyrics negative cache hit: {cache_id}")
+                            return {
+                                "video_id": video_id,
+                                "synced": [],
+                                "plain": "",
+                                "has_synced": False,
+                                "source": "none",
+                            }
+                elif cached.get("synced_lyrics") or cached.get("plain_lyrics"):
+                    logger.info(f"📦 Lyrics cache hit: {cache_id}")
+                    return {
+                        "video_id": video_id,
+                        "synced": cached.get("synced_lyrics", []),
+                        "plain": cached.get("plain_lyrics", ""),
+                        "has_synced": len(cached.get("synced_lyrics", [])) > 0,
+                        "source": cached.get("source", "cache"),
+                    }
         except Exception:
             pass
 
@@ -72,6 +88,7 @@ async def fetch_lyrics(
         album_name=movie,
         duration=duration,
         language=language,
+        video_id=video_id,
     )
 
     if result:
@@ -82,6 +99,7 @@ async def fetch_lyrics(
                     {
                         "$set": {
                             **result,
+                            "found": True,
                             "cached_at": datetime.now(timezone.utc),
                         }
                     },
@@ -97,6 +115,24 @@ async def fetch_lyrics(
             "has_synced": len(result.get("synced_lyrics", [])) > 0,
             "source": result.get("source", "lrclib"),
         }
+
+    # Negative Caching: record that no lyrics were found so instrumentals don't re-trigger scraping
+    if db is not None:
+        try:
+            await db.lyrics_cache.update_one(
+                {"_id": cache_id},
+                {
+                    "$set": {
+                        "lyrics": None,
+                        "synced": False,
+                        "found": False,
+                        "cached_at": datetime.now(timezone.utc),
+                    }
+                },
+                upsert=True,
+            )
+        except Exception:
+            pass
 
     return {
         "video_id": video_id,

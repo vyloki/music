@@ -18,14 +18,21 @@ from app.models.user import (
 from app.utils.security import (
     hash_password,
     verify_password,
+    hash_password_async,
+    verify_password_async,
     create_access_token,
     create_refresh_token,
     decode_token,
     get_current_user,
 )
+from app.services.youtube_service import get_video_info
 from app.config import settings
 from bson import ObjectId
+from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
+from app.utils.db import to_object_id
 from datetime import datetime, timezone
+import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
@@ -82,17 +89,21 @@ async def register(data: UserRegister, db=Depends(get_db)):
             detail="Username already taken"
         )
 
+    # Hash password asynchronously
+    password_hash = await hash_password_async(data.password)
+
     # Create user document
     now = datetime.now(timezone.utc)
     user_doc = {
         "username": data.username,
         "email": data.email,
-        "password_hash": hash_password(data.password),
+        "password_hash": password_hash,
         "display_name": data.display_name or data.username,
         "avatar_url": None,
         "created_at": now,
         "updated_at": now,
         "liked_tracks": [],
+        "liked_songs": [],
         "settings": {
             "theme": "sand",
             "quality": "high",
@@ -101,7 +112,13 @@ async def register(data: UserRegister, db=Depends(get_db)):
     }
 
     # Insert into MongoDB
-    result = await db.users.insert_one(user_doc)
+    try:
+        result = await db.users.insert_one(user_doc)
+    except DuplicateKeyError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Email or username already registered"
+        )
     user_doc["_id"] = result.inserted_id
 
     logger.info(f"✅ New user registered: {data.username} ({data.email})")
@@ -137,8 +154,8 @@ async def login(data: UserLogin, db=Depends(get_db)):
             detail="Invalid email or password"
         )
 
-    # Verify password
-    if not verify_password(data.password, user["password_hash"]):
+    # Verify password asynchronously
+    if not await verify_password_async(data.password, user["password_hash"]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
@@ -167,6 +184,7 @@ async def login(data: UserLogin, db=Depends(get_db)):
 async def refresh_token(data: RefreshTokenRequest, db=Depends(get_db)):
     """
     Use a valid refresh token to get a new access token.
+    Rotates the refresh token and invalidates the previous one.
     """
     # Decode the refresh token
     payload = decode_token(data.refresh_token)
@@ -178,12 +196,38 @@ async def refresh_token(data: RefreshTokenRequest, db=Depends(get_db)):
         )
 
     user_id = payload.get("sub")
+    if not user_id or not ObjectId.is_valid(user_id):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid user identifier"
+        )
+
+    # Check if token was revoked
+    if db is not None:
+        revoked = await db.revoked_tokens.find_one({"token": data.refresh_token})
+        if revoked:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Refresh token has been revoked"
+            )
+
     user = await db.users.find_one({"_id": ObjectId(user_id)})
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found"
         )
+
+    # Revoke old refresh token (Token rotation)
+    if db is not None:
+        try:
+            await db.revoked_tokens.insert_one({
+                "token": data.refresh_token,
+                "user_id": user_id,
+                "revoked_at": datetime.now(timezone.utc),
+            })
+        except Exception as e:
+            logger.debug(f"Revoke token note: {e}")
 
     # Generate new tokens
     new_access_token = create_access_token(
@@ -198,6 +242,30 @@ async def refresh_token(data: RefreshTokenRequest, db=Depends(get_db)):
         expires_in=settings.jwt_access_token_expire_minutes * 60,
         user=user_to_response(user),
     )
+
+
+@router.post(
+    "/logout",
+    response_model=MessageResponse,
+    summary="Sign out user and invalidate refresh token"
+)
+async def logout(data: Optional[RefreshTokenRequest] = None, db=Depends(get_db)):
+    """Revoke refresh token on sign out."""
+    if data and data.refresh_token and db is not None:
+        try:
+            await db.revoked_tokens.update_one(
+                {"token": data.refresh_token},
+                {
+                    "$set": {
+                        "token": data.refresh_token,
+                        "revoked_at": datetime.now(timezone.utc),
+                    }
+                },
+                upsert=True,
+            )
+        except Exception:
+            pass
+    return MessageResponse(message="Successfully signed out")
 
 
 @router.get(
@@ -225,7 +293,7 @@ async def update_profile(
 ):
     """
     Update the current user's profile information.
-    Only provided fields will be updated.
+    Only provided fields will be updated using find_one_and_update in a single query.
     """
     update_fields = {}
 
@@ -236,22 +304,26 @@ async def update_profile(
     if data.settings is not None:
         # Merge settings (don't replace entirely)
         current_settings = user.get("settings", {})
-        current_settings.update(data.settings)
-        update_fields["settings"] = current_settings
+        if isinstance(current_settings, dict):
+            merged_settings = dict(current_settings)
+            merged_settings.update(data.settings)
+        else:
+            merged_settings = data.settings
+        update_fields["settings"] = merged_settings
 
-    if update_fields:
+    if update_fields and db is not None:
         update_fields["updated_at"] = datetime.now(timezone.utc)
-        await db.users.update_one(
+        updated_user = await db.users.find_one_and_update(
             {"_id": ObjectId(user["_id"])},
-            {"$set": update_fields}
+            {"$set": update_fields},
+            return_document=ReturnDocument.AFTER
         )
+        if not updated_user:
+            updated_user = {**user, **update_fields}
+    else:
+        updated_user = {**user, **update_fields}
 
-    # Fetch updated user
-    updated_user = await db.users.find_one(
-        {"_id": ObjectId(user["_id"])}
-    )
     updated_user["_id"] = str(updated_user["_id"])
-
     return user_to_response(updated_user)
 
 
@@ -267,15 +339,32 @@ async def toggle_like(
 ):
     """Toggle like/unlike on a track with full track metadata preservation."""
     liked_tracks = user.get("liked_tracks", [])
+    liked_songs = user.get("liked_songs", [])
     user_id_str = str(user["_id"])
     track_data = body.get("track") if (body and isinstance(body, dict)) else None
 
-    if video_id in liked_tracks:
+    is_currently_liked = (
+        video_id in liked_tracks or
+        video_id in liked_songs or
+        (isinstance(liked_songs, list) and any(isinstance(item, dict) and item.get("video_id") == video_id for item in liked_songs))
+    )
+
+    if is_currently_liked:
         # Unlike
         await db.users.update_one(
             {"_id": ObjectId(user["_id"])},
-            {"$pull": {"liked_tracks": video_id}}
+            {
+                "$pull": {
+                    "liked_tracks": video_id,
+                    "liked_songs": video_id,
+                }
+            }
         )
+        if isinstance(liked_songs, list) and any(isinstance(item, dict) for item in liked_songs):
+            await db.users.update_one(
+                {"_id": ObjectId(user["_id"])},
+                {"$pull": {"liked_songs": {"video_id": video_id}}}
+            )
         if db is not None:
             await db.liked_songs.delete_one({"user_id": user_id_str, "video_id": video_id})
         return {"status": "unliked", "is_liked": False, "message": "Track unliked"}
@@ -283,12 +372,19 @@ async def toggle_like(
         # Like
         await db.users.update_one(
             {"_id": ObjectId(user["_id"])},
-            {"$addToSet": {"liked_tracks": video_id}}
+            {
+                "$addToSet": {
+                    "liked_tracks": video_id,
+                    "liked_songs": video_id,
+                }
+            }
         )
         if db is not None:
             # If track_data was not sent, check song_cache or stream_cache
             if not track_data:
-                cached = await db.song_cache.find_one({"_id": video_id})
+                cached = await db.song_cache.find_one({"video_id": video_id})
+                if not cached:
+                    cached = await db.song_cache.find_one({"_id": video_id})
                 if cached:
                     track_data = cached
                 else:
@@ -341,6 +437,41 @@ async def toggle_like(
         return {"status": "liked", "is_liked": True, "message": "Track liked"}
 
 
+@router.delete(
+    "/like/{video_id}",
+    summary="Unlike a track"
+)
+async def unlike_track(
+    video_id: str,
+    user: dict = Depends(get_current_user),
+    db=Depends(get_db)
+):
+    """
+    Unlike a track using standard DELETE REST method.
+    Pulls track from user's liked collections using $pull and removes from liked_songs.
+    """
+    user_id_str = str(user["_id"])
+    if db is not None:
+        await db.users.update_one(
+            {"_id": ObjectId(user["_id"])},
+            {
+                "$pull": {
+                    "liked_songs": video_id,
+                    "liked_tracks": video_id,
+                }
+            }
+        )
+        liked_songs_list = user.get("liked_songs", [])
+        if isinstance(liked_songs_list, list) and any(isinstance(item, dict) for item in liked_songs_list):
+            await db.users.update_one(
+                {"_id": ObjectId(user["_id"])},
+                {"$pull": {"liked_songs": {"video_id": video_id}}}
+            )
+        await db.liked_songs.delete_one({"user_id": user_id_str, "video_id": video_id})
+
+    return {"status": "unliked", "is_liked": False, "message": "Track unliked"}
+
+
 @router.get(
     "/liked",
     summary="Get all liked tracks"
@@ -349,17 +480,23 @@ async def get_liked_tracks(
     user: dict = Depends(get_current_user),
     db=Depends(get_db)
 ):
-    """Retrieve full track objects for all liked songs of the user."""
+    """
+    Retrieve full track objects for all liked songs of the user.
+    Eliminates N+1 sequential fetches:
+    - Partitions liked items into full objects vs string video IDs.
+    - Queries song_cache with db.song_cache.find({"video_id": {"$in": string_ids}}) in ONE single query.
+    - Concurrently fetches remaining IDs with asyncio.gather.
+    """
     user_id_str = str(user["_id"])
     if db is None:
         return {"tracks": [], "total": 0}
 
+    tracks = []
+    seen_ids = set()
+
     # 1. Lookup from liked_songs collection (instant, preserved metadata)
     cursor = db.liked_songs.find({"user_id": user_id_str}).sort("liked_at", -1)
     docs = await cursor.to_list(200)
-
-    tracks = []
-    seen_ids = set()
 
     for doc in docs:
         vid = doc.get("video_id")
@@ -379,38 +516,98 @@ async def get_liked_tracks(
             t["is_liked"] = True
             tracks.append(t)
 
-    # 2. Backfill any IDs in user.liked_tracks not yet in liked_songs
-    user_liked_ids = user.get("liked_tracks", [])
-    for vid in user_liked_ids:
-        if vid not in seen_ids:
-            cached = await db.song_cache.find_one({"_id": vid})
-            if cached:
-                cached.pop("_id", None)
-                cached["video_id"] = vid
-                cached["is_liked"] = True
-                tracks.append(cached)
+    # 2. Partition user-level liked items into full objects vs string video IDs
+    raw_user_liked = []
+    for key in ("liked_songs", "liked_tracks"):
+        val = user.get(key)
+        if isinstance(val, list):
+            for item in val:
+                if item is not None and item not in raw_user_liked:
+                    raw_user_liked.append(item)
+
+    full_objects = []
+    string_ids = []
+
+    for item in raw_user_liked:
+        if isinstance(item, dict):
+            vid = item.get("video_id") or item.get("id")
+            if vid:
+                vid = str(vid)
+                if vid not in seen_ids:
+                    seen_ids.add(vid)
+                    t = dict(item)
+                    t["video_id"] = vid
+                    t["is_liked"] = True
+                    full_objects.append(t)
+        elif isinstance(item, str) and item.strip():
+            vid = item.strip()
+            if vid not in seen_ids and vid not in string_ids:
+                string_ids.append(vid)
+
+    tracks.extend(full_objects)
+
+    # 3. For string video IDs, query song_cache in ONE single query
+    if string_ids:
+        cached_map = {}
+        cursor = db.song_cache.find({"video_id": {"$in": string_ids}})
+        cached_docs = await cursor.to_list(len(string_ids) + 10)
+        for c in cached_docs:
+            vid = c.get("video_id") or c.get("_id")
+            if vid:
+                c.pop("_id", None)
+                c["video_id"] = str(vid)
+                c["is_liked"] = True
+                cached_map[str(vid)] = c
+
+        # 4. If any remaining IDs are not in song_cache, fetch concurrently with asyncio.gather
+        remaining_ids = [vid for vid in string_ids if vid not in cached_map]
+
+        if remaining_ids:
+            async def _fetch_single_track(vid: str) -> dict:
+                try:
+                    if not vid.startswith("ext_"):
+                        info = await get_video_info(vid)
+                        if info and isinstance(info, dict):
+                            info.pop("_id", None)
+                            info["video_id"] = vid
+                            info["is_liked"] = True
+                            return info
+                    else:
+                        stream_cached = await db.stream_cache.find_one({"_id": vid})
+                        if stream_cached:
+                            return {
+                                "video_id": vid,
+                                "title": stream_cached.get("title") or "Liked Audio",
+                                "track_name": stream_cached.get("title") or "Liked Audio",
+                                "artist": stream_cached.get("artist") or "",
+                                "thumbnail": stream_cached.get("thumbnail") or "",
+                                "album_art": stream_cached.get("thumbnail") or "",
+                                "duration": stream_cached.get("duration", 0),
+                                "is_extracted": True,
+                                "is_liked": True,
+                            }
+                except Exception as e:
+                    logger.warning(f"Error fetching track info for {vid}: {e}")
+
+                return {
+                    "video_id": vid,
+                    "title": "Liked Song",
+                    "track_name": "Liked Song",
+                    "artist": "",
+                    "thumbnail": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg" if not vid.startswith("ext_") else "",
+                    "album_art": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg" if not vid.startswith("ext_") else "",
+                    "duration": 0,
+                    "is_extracted": vid.startswith("ext_"),
+                    "is_liked": True,
+                }
+
+            fetched_tracks = await asyncio.gather(*[_fetch_single_track(vid) for vid in remaining_ids])
+            for t in fetched_tracks:
+                cached_map[t["video_id"]] = t
+
+        for vid in string_ids:
+            if vid in cached_map and vid not in seen_ids:
                 seen_ids.add(vid)
-            else:
-                stream_cached = await db.stream_cache.find_one({"_id": vid})
-                if stream_cached:
-                    tracks.append({
-                        "video_id": vid,
-                        "title": stream_cached.get("title") or "Liked Track",
-                        "artist": stream_cached.get("artist") or "",
-                        "thumbnail": "",
-                        "duration": stream_cached.get("duration", 0),
-                        "is_extracted": vid.startswith("ext_"),
-                        "is_liked": True
-                    })
-                else:
-                    tracks.append({
-                        "video_id": vid,
-                        "title": "Liked Song",
-                        "artist": "",
-                        "thumbnail": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg" if not vid.startswith("ext_") else "",
-                        "duration": 0,
-                        "is_liked": True,
-                    })
-                seen_ids.add(vid)
+                tracks.append(cached_map[vid])
 
     return {"tracks": tracks, "total": len(tracks)}

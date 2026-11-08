@@ -283,10 +283,10 @@ const Extract = {
         const title = track.title || track.track_name || 'extracted_song';
         const artist = track.movie || track.artist || 'artist';
 
-        // Check if stream is an ext_ extraction ID or standard YouTube ID
+        const apiBase = (typeof API !== 'undefined' && API.baseUrl) ? API.baseUrl : '';
         const downloadUrl = track.video_id && track.video_id.startsWith('ext_')
-            ? `/api/extract/download/${track.video_id}?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}`
-            : `/api/download/${track.video_id}?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}`;
+            ? `${apiBase}/api/extract/download/${track.video_id}?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}`
+            : `${apiBase}/api/stream/${track.video_id}/download?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}`;
 
         showToast(`Starting download: ${title}...`, 'info');
         const link = document.createElement('a');

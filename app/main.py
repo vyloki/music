@@ -4,22 +4,48 @@ Main application setup with CORS, static files, lifespan, and route registration
 """
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from bson.errors import InvalidId
 from app.config import settings
 from app.database import database
+from app.tasks import shutdown_background_tasks
+from app.services.http_client import close_http_clients
+from app.utils.cache import health_cache
 import logging
 import os
 
 # Configure logging
+log_level = logging.DEBUG if settings.debug else logging.INFO
 logging.basicConfig(
-    level=logging.DEBUG if settings.debug else logging.INFO,
+    level=log_level,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%H:%M:%S",
+    force=True,
 )
+
+# Silence noisy third-party loggers (PyMongo heartbeat floods, passlib, httpx connection traces)
+NOISY_LOGGERS = [
+    "pymongo",
+    "pymongo.topology",
+    "pymongo.serverSelection",
+    "pymongo.connection",
+    "pymongo.command",
+    "passlib",
+    "urllib3",
+    "asyncio",
+    "httpcore",
+    "httpx",
+    "watchfiles",
+]
+for logger_name in NOISY_LOGGERS:
+    logging.getLogger(logger_name).setLevel(logging.WARNING)
+
 logger = logging.getLogger("wave")
+logging.getLogger("app").setLevel(log_level)
 
 
 @asynccontextmanager
@@ -48,7 +74,16 @@ async def lifespan(app: FastAPI):
 
     # === SHUTDOWN ===
     logger.info("🛑 Shutting down Wave...")
+    try:
+        await shutdown_background_tasks(timeout=2.0)
+    except Exception as e:
+        logger.debug(f"Background task shutdown: {e}")
+
     await database.disconnect()
+    try:
+        await close_http_clients()
+    except Exception as e:
+        logger.debug(f"HTTP clients shutdown: {e}")
     logger.info("👋 Wave stopped gracefully")
 
 
@@ -89,19 +124,35 @@ app.include_router(extract.router)
 @app.get("/api/health", tags=["System"])
 async def health_check():
     """Health check endpoint to verify the server and database are running."""
-    try:
-        # Ping MongoDB to check connection
-        await database.client.admin.command("ping")
-        db_status = "connected"
-    except Exception:
-        db_status = "disconnected"
+    cached = health_cache.get("health")
+    if cached is not None:
+        return cached
 
-    return {
+    db_status = "disconnected"
+    if database.client is not None:
+        try:
+            await database.client.admin.command("ping")
+            db_status = "connected"
+        except Exception:
+            db_status = "disconnected"
+
+    result = {
         "status": "healthy",
         "app": settings.app_name,
         "version": settings.app_version,
         "database": db_status,
     }
+    health_cache.set("health", result, ttl=5.0)
+    return result
+
+
+# Global exception handler for invalid MongoDB ObjectIds
+@app.exception_handler(InvalidId)
+async def invalid_id_handler(request: Request, exc: InvalidId):
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={"detail": "Invalid resource ID format"},
+    )
 
 
 # --- Static Files & Frontend Serving ---

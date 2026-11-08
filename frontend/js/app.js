@@ -53,23 +53,31 @@ const API = {
         }
 
         try {
-            const response = await fetch(`${this.baseUrl}${url}`, options);
+            let response = await fetch(`${this.baseUrl}${url}`, options);
 
             // Handle token expiry
-            if (response.status === 401 && !url.includes('/api/auth/login') && !url.includes('/api/auth/register')) {
+            if (response.status === 401 && !url.includes('/api/auth/login') && !url.includes('/api/auth/register') && !url.includes('/api/auth/refresh')) {
                 const refreshed = await Auth.refreshToken();
                 if (refreshed) {
                     options.headers = this.getHeaders();
-                    const retryResponse = await fetch(`${this.baseUrl}${url}`, options);
-                    return await retryResponse.json();
+                    response = await fetch(`${this.baseUrl}${url}`, options);
                 } else {
+                    Auth.logout();
                     return null;
                 }
             }
 
             if (!response.ok) {
                 const error = await response.json().catch(() => ({}));
-                throw new Error(error.detail || `HTTP ${response.status}`);
+                let errorMsg = `HTTP ${response.status}`;
+                if (Array.isArray(error.detail)) {
+                    errorMsg = error.detail.map(d => d.msg || `${d.loc?.slice(-1)}: invalid`).join(', ');
+                } else if (typeof error.detail === 'string') {
+                    errorMsg = error.detail;
+                } else if (error.message) {
+                    errorMsg = error.message;
+                }
+                throw new Error(errorMsg);
             }
 
             return await response.json();
@@ -1414,9 +1422,15 @@ function addToQueue(index) {
 async function downloadSong(videoId, title, artist) {
     showToast(`Starting download: ${title}...`);
     try {
+        const apiBase = (typeof API !== 'undefined' && API.baseUrl) ? API.baseUrl : '';
+        const isExtracted = videoId && videoId.startsWith('ext_');
+        const endpoint = isExtracted
+            ? `${apiBase}/api/extract/download/${videoId}`
+            : `${apiBase}/api/stream/${videoId}/download`;
+
         const link = document.createElement('a');
-        link.href = `/api/download/${videoId}?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}`;
-        link.download = `${title}.mp3`;
+        link.href = `${endpoint}?title=${encodeURIComponent(title || 'song')}&artist=${encodeURIComponent(artist || 'artist')}`;
+        link.download = `${title || 'song'}.mp3`;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
@@ -1443,9 +1457,12 @@ function updateGreeting() {
 
 function escapeHtml(text) {
     if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 function formatDuration(seconds) {

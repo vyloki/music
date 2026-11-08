@@ -4,6 +4,7 @@
   "description": "Wave Music Streaming Application",
   "private": true,
   "scripts": {
+    "build": "echo 'Frontend ready'",
     "cap:sync": "cap sync",
     "cap:open": "cap open ios"
   },

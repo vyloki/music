@@ -192,6 +192,7 @@ const Player = {
         if (!existingAudio) {
             this.audio = document.createElement('audio');
             this.audio.id = 'wave-native-audio';
+            this.audio.crossOrigin = 'anonymous'; // Required for Web Audio Analyser
             this.audio.setAttribute('playsinline', 'true');
             this.audio.setAttribute('webkit-playsinline', 'true');
             this.audio.setAttribute('x-webkit-airplay', 'allow');
@@ -200,6 +201,7 @@ const Player = {
             document.body.appendChild(this.audio);
         } else {
             this.audio = existingAudio;
+            this.audio.crossOrigin = 'anonymous';
             this.audio.setAttribute('playsinline', 'true');
             this.audio.setAttribute('webkit-playsinline', 'true');
             this.audio.setAttribute('x-webkit-airplay', 'allow');
@@ -1547,6 +1549,12 @@ const Player = {
         if (this.currentTrack && !this.currentTrack.isLocal && this.currentTrack.video_id && !this.currentTrack.video_id.startsWith('ext_') && this.activeEngine !== 'yt') {
             console.info('Switching to YouTube Audio Engine for seamless playback...');
             this.playViaYTBridge(this.currentTrack);
+        } else {
+            this.isPlaying = false;
+            this.onPlayState(false);
+            if (typeof showToast === 'function') {
+                showToast('Unable to stream this track', 'error');
+            }
         }
     },
 
@@ -1666,8 +1674,18 @@ const Player = {
             });
         } catch (e) { console.debug('MediaSession nexttrack not supported:', e); }
 
-        // Explicitly UNREGISTER seekto, seekbackward, and seekforward so WebKit/iOS does not show 10s skip buttons
-        try { navigator.mediaSession.setActionHandler('seekto', null); } catch (e) {}
+        try {
+            navigator.mediaSession.setActionHandler('seekto', (details) => {
+                if (details.seekTime !== undefined) {
+                    if (this.activeEngine === 'yt') {
+                        YTBridge.seekTo(details.seekTime);
+                    } else if (this.audio && !isNaN(this.audio.duration)) {
+                        this.audio.currentTime = details.seekTime;
+                    }
+                    this.updatePositionState();
+                }
+            });
+        } catch (e) { console.debug('MediaSession seekto not supported:', e); }
         try { navigator.mediaSession.setActionHandler('seekbackward', null); } catch (e) {}
         try { navigator.mediaSession.setActionHandler('seekforward', null); } catch (e) {}
 

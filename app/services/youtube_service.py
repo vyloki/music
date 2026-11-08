@@ -5,12 +5,20 @@ Search YouTube for songs and extract audio metadata & stream URLs using yt-dlp.
 
 import yt_dlp
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import logging
 from typing import Optional, List, Dict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import re
+import json
+
+from app.database import database
+from app.services.http_client import get_http_client
 
 logger = logging.getLogger(__name__)
+
+# Dedicated bounded thread pool for yt-dlp worker threads
+_ytdlp_executor = ThreadPoolExecutor(max_workers=10, thread_name_prefix="ytdlp_worker")
 
 # yt-dlp options for fast flat search
 SEARCH_OPTS = {
@@ -20,22 +28,23 @@ SEARCH_OPTS = {
     "skip_download": True,
     "ignoreerrors": True,
     "no_color": True,
+    "socket_timeout": 15,
 }
 
-# yt-dlp options for stream URL extraction (using Android client to bypass cloud bot challenges)
+# yt-dlp options for stream URL extraction
 STREAM_OPTS = {
     "quiet": True,
     "no_warnings": True,
     "skip_download": True,
-    "format": "ba/b/18/best",
+    "format": "ba[acodec!=none]/bestaudio/ba/b/18/best",
     "extractor_args": {
         "youtube": {
-            "player_client": ["android"],
-            "player_skip": ["webpage", "configs"],
+            "player_client": ["android", "ios", "mweb", "web"],
         }
     },
-    "ignoreerrors": True,
+    "ignoreerrors": False,
     "no_color": True,
+    "socket_timeout": 15,
 }
 
 
@@ -365,15 +374,63 @@ async def search_youtube(
 
         return results
 
-    loop = asyncio.get_event_loop()
-    results = await loop.run_in_executor(None, _search)
+    loop = asyncio.get_running_loop()
+    results = await loop.run_in_executor(_ytdlp_executor, _search)
 
     logger.info(f"🔍 YouTube search '{query}': {len(results)} results")
     return results
 
 
 async def get_video_info(video_id: str) -> Optional[dict]:
-    """Get detailed info for a specific YouTube video."""
+    """
+    Get detailed info for a specific YouTube video.
+    Checks MongoDB song_cache first before invoking yt-dlp.
+    """
+    db = database.db
+    if db is not None:
+        try:
+            cached = await db.song_cache.find_one({"video_id": video_id})
+            if not cached:
+                cached = await db.song_cache.find_one({"_id": video_id})
+
+            if cached:
+                cached_at = cached.get("cached_at")
+                is_recent = True
+                if cached_at:
+                    if isinstance(cached_at, str):
+                        try:
+                            cached_at = datetime.fromisoformat(cached_at)
+                        except Exception:
+                            cached_at = None
+                    if isinstance(cached_at, datetime):
+                        if cached_at.tzinfo is None:
+                            cached_at = cached_at.replace(tzinfo=timezone.utc)
+                        # Retain cache for 7 days
+                        if (datetime.now(timezone.utc) - cached_at).total_seconds() > 7 * 86400:
+                            is_recent = False
+
+                if is_recent:
+                    cached.pop("_id", None)
+                    cached["video_id"] = video_id
+                    return {
+                        "video_id": video_id,
+                        "title": cached.get("title") or cached.get("track_name") or "Unknown Song",
+                        "track_name": cached.get("track_name") or cached.get("title") or "Unknown Song",
+                        "movie": cached.get("movie", ""),
+                        "language": cached.get("language", ""),
+                        "artist": cached.get("artist", "Unknown Artist"),
+                        "subtitle": cached.get("subtitle", ""),
+                        "album": cached.get("album") or cached.get("movie") or "",
+                        "duration": int(cached.get("duration") or 0),
+                        "thumbnail": cached.get("thumbnail") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                        "view_count": cached.get("view_count") or 0,
+                        "webpage_url": cached.get("webpage_url") or f"https://www.youtube.com/watch?v={video_id}",
+                        "source": cached.get("source") or "youtube",
+                        "track_type": cached.get("track_type") or "song",
+                    }
+        except Exception as e:
+            logger.debug(f"Song cache lookup skipped for {video_id}: {e}")
+
     def _get_info():
         url = f"https://www.youtube.com/watch?v={video_id}"
         opts = {
@@ -392,8 +449,23 @@ async def get_video_info(video_id: str) -> Optional[dict]:
             logger.error(f"Video info error for {video_id}: {e}")
         return None
 
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _get_info)
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(_ytdlp_executor, _get_info)
+
+    if result and db is not None:
+        try:
+            doc_to_cache = {k: v for k, v in result.items() if k != "_id"}
+            doc_to_cache["video_id"] = video_id
+            doc_to_cache["cached_at"] = datetime.now(timezone.utc)
+            await db.song_cache.update_one(
+                {"video_id": video_id},
+                {"$set": doc_to_cache, "$setOnInsert": {"_id": video_id}},
+                upsert=True,
+            )
+        except Exception as e:
+            logger.debug(f"Failed to update song_cache for {video_id}: {e}")
+
+    return result
 
 
 async def get_stream_url(video_id: str) -> Optional[dict]:
@@ -421,8 +493,8 @@ async def get_stream_url(video_id: str) -> Optional[dict]:
             logger.error(f"Stream extraction error for {video_id}: {e}")
         return None
 
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, _extract)
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(_ytdlp_executor, _extract)
 
     if result:
         logger.info(f"🎶 Stream URL extracted for {video_id} ({result.get('ext')})")
@@ -432,11 +504,8 @@ async def get_stream_url(video_id: str) -> Optional[dict]:
     return result
 
 
-async def get_youtube_suggestions(query: str) -> List[str]:
+async def get_search_suggestions(query: str) -> List[str]:
     """Get clean, music-focused YouTube search autocomplete suggestions (Spotify style)."""
-    import httpx
-    import json
-
     blocked_terms = [
         "trailer", "teaser", "review", "reaction", "full movie", "movie review",
         "movie scenes", "scene", "scenes", "comedy", "interview", "press meet",
@@ -454,50 +523,54 @@ async def get_youtube_suggestions(query: str) -> List[str]:
             "q": query,
             "ds": "yt",
         }
-        async with httpx.AsyncClient(timeout=4.0) as client:
-            resp = await client.get(url, params=params)
-            if resp.status_code == 200:
-                text = resp.text
-                start = text.index("(") + 1
-                end = text.rindex(")")
-                data = json.loads(text[start:end])
-                if data and len(data) > 1 and isinstance(data[1], list):
-                    raw_suggestions = [item[0] for item in data[1] if item and isinstance(item, list)]
-                    cleaned_list = []
-                    seen = set()
+        client = get_http_client()
+        resp = await client.get(url, params=params, timeout=4.0)
+        if resp.status_code == 200:
+            text = resp.text
+            start = text.index("(") + 1
+            end = text.rindex(")")
+            data = json.loads(text[start:end])
+            if data and len(data) > 1 and isinstance(data[1], list):
+                raw_suggestions = [item[0] for item in data[1] if item and isinstance(item, list)]
+                cleaned_list = []
+                seen = set()
 
-                    for s in raw_suggestions:
-                        if not isinstance(s, str):
+                for s in raw_suggestions:
+                    if not isinstance(s, str):
+                        continue
+                    s_clean = s.strip()
+                    s_lower = s_clean.lower()
+
+                    # Skip blocked non-music terms
+                    if any(b in s_lower for b in blocked_terms):
+                        continue
+
+                    # If contains "movie" without music terms, skip
+                    if "movie" in s_lower:
+                        if not any(k in s_lower for k in ["song", "bgm", "music", "audio", "album", "track", "soundtrack"]):
                             continue
-                        s_clean = s.strip()
-                        s_lower = s_clean.lower()
+                        s_clean = re.sub(r"\bmovie\s+songs?\b", "songs", s_clean, flags=re.IGNORECASE)
+                        s_clean = re.sub(r"\bmovie\b", "", s_clean, flags=re.IGNORECASE)
 
-                        # Skip blocked non-music terms
-                        if any(b in s_lower for b in blocked_terms):
-                            continue
+                    # Clean "video song/songs" -> "songs"
+                    s_clean = re.sub(r"\bvideo\s+songs?\b", "songs", s_clean, flags=re.IGNORECASE)
+                    # Clean noise tags like 4k, hd, full video, official video, etc.
+                    s_clean = re.sub(r"\b(4k|8k|hd|full\s*video|official\s*video|lyrical\s*video|lyrics|official)\b", "", s_clean, flags=re.IGNORECASE)
+                    s_clean = re.sub(r"\s{2,}", " ", s_clean).strip()
 
-                        # If contains "movie" without music terms, skip
-                        if "movie" in s_lower:
-                            if not any(k in s_lower for k in ["song", "bgm", "music", "audio", "album", "track", "soundtrack"]):
-                                continue
-                            s_clean = re.sub(r"\bmovie\s+songs?\b", "songs", s_clean, flags=re.IGNORECASE)
-                            s_clean = re.sub(r"\bmovie\b", "", s_clean, flags=re.IGNORECASE)
+                    if s_clean and s_clean.lower() not in seen:
+                        seen.add(s_clean.lower())
+                        cleaned_list.append(s_clean)
 
-                        # Clean "video song/songs" -> "songs"
-                        s_clean = re.sub(r"\bvideo\s+songs?\b", "songs", s_clean, flags=re.IGNORECASE)
-                        # Clean noise tags like 4k, hd, full video, official video, etc.
-                        s_clean = re.sub(r"\b(4k|8k|hd|full\s*video|official\s*video|lyrical\s*video|lyrics|official)\b", "", s_clean, flags=re.IGNORECASE)
-                        s_clean = re.sub(r"\s{2,}", " ", s_clean).strip()
-
-                        if s_clean and s_clean.lower() not in seen:
-                            seen.add(s_clean.lower())
-                            cleaned_list.append(s_clean)
-
-                    return cleaned_list[:8]
+                return cleaned_list[:8]
     except Exception as e:
         logger.warning(f"Suggestions error for '{query}': {e}")
 
     return []
+
+
+# Backwards compatibility alias
+get_youtube_suggestions = get_search_suggestions
 
 
 async def get_related_videos(video_id: str, max_results: int = 10) -> List[dict]:
@@ -527,8 +600,8 @@ async def get_related_videos(video_id: str, max_results: int = 10) -> List[dict]
 
         return results
 
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _get_related)
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_ytdlp_executor, _get_related)
 
 
 async def get_language_versions(
@@ -538,30 +611,32 @@ async def get_language_versions(
 ) -> List[dict]:
     """
     Search YouTube for this song in multiple languages and return one best match per language.
-    Uses asyncio.gather to fan out searches in parallel.
+    Uses asyncio.gather with Semaphore(3) to cap concurrent searches.
     Languages checked: Telugu, Tamil, Hindi, Malayalam, Kannada.
     """
     languages = ["Telugu", "Tamil", "Hindi", "Malayalam", "Kannada"]
     base_query = f"{track_name} {movie}".strip()
+    sem = asyncio.Semaphore(3)
 
     async def _search_one_language(lang: str) -> Optional[dict]:
-        query = f"{base_query} {lang} song"
-        try:
-            results = await search_youtube(query, max_results=5)
-            for r in results:
-                vid = r.get("video_id", "")
-                # Skip the current playing song's own video
-                if vid and vid != current_video_id:
-                    detected_lang = r.get("language", "")
-                    # Only return if language matches or is close
-                    if not detected_lang or detected_lang.lower() == lang.lower():
-                        r["language"] = lang  # Force the language we searched for
-                        return r
-        except Exception as e:
-            logger.debug(f"Language version search failed for {lang}: {e}")
-        return None
+        async with sem:
+            query = f"{base_query} {lang} song"
+            try:
+                results = await search_youtube(query, max_results=5)
+                for r in results:
+                    vid = r.get("video_id", "")
+                    # Skip the current playing song's own video
+                    if vid and vid != current_video_id:
+                        detected_lang = r.get("language", "")
+                        # Only return if language matches or is close
+                        if not detected_lang or detected_lang.lower() == lang.lower():
+                            r["language"] = lang  # Force the language we searched for
+                            return r
+            except Exception as e:
+                logger.debug(f"Language version search failed for {lang}: {e}")
+            return None
 
-    # Fan out all language searches in parallel
+    # Fan out all language searches in parallel capped by semaphore
     tasks = [_search_one_language(lang) for lang in languages]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -587,3 +662,84 @@ async def get_language_versions(
                 })
 
     return versions
+
+
+async def search_multi_language(
+    query: str,
+    languages: Optional[List[str]] = None,
+    max_results: int = 5,
+) -> Dict[str, List[dict]]:
+    """
+    Search YouTube across multiple languages concurrently with Semaphore(3) concurrency cap.
+    """
+    if languages is None:
+        languages = ["Telugu", "Tamil", "Hindi", "Malayalam", "Kannada", "English"]
+
+    sem = asyncio.Semaphore(3)
+
+    async def _search_lang(lang: str) -> tuple[str, List[dict]]:
+        async with sem:
+            q = f"{query} {lang}".strip()
+            try:
+                res = await search_youtube(q, max_results=max_results)
+                return lang, res
+            except Exception as e:
+                logger.debug(f"Multi-language search failed for {lang}: {e}")
+                return lang, []
+
+    tasks = [_search_lang(l) for l in languages]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    output: Dict[str, List[dict]] = {}
+    for r in results:
+        if isinstance(r, tuple) and len(r) == 2:
+            lang, tracks = r
+            output[lang] = tracks
+    return output
+
+
+async def get_trending_multi_language(
+    languages: Optional[List[str]] = None,
+    max_results: int = 10,
+) -> Dict[str, List[dict]]:
+    """
+    Fetch trending tracks across multiple languages concurrently with Semaphore(3) concurrency cap.
+    """
+    if languages is None:
+        languages = ["Telugu", "Tamil", "Hindi", "English", "Malayalam", "Kannada", "Punjabi"]
+
+    sem = asyncio.Semaphore(3)
+
+    async def _fetch_trending_lang(lang: str) -> tuple[str, List[dict]]:
+        async with sem:
+            q = f"Top trending {lang} songs"
+            try:
+                res = await search_youtube(q, max_results=max_results)
+                return lang, res
+            except Exception as e:
+                logger.debug(f"Trending multi-language fetch failed for {lang}: {e}")
+                return lang, []
+
+    tasks = [_fetch_trending_lang(l) for l in languages]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    output: Dict[str, List[dict]] = {}
+    for r in results:
+        if isinstance(r, tuple) and len(r) == 2:
+            lang, tracks = r
+            output[lang] = tracks
+    return output
+
+
+class YouTubeService:
+    """YouTube Service providing search, stream extraction, suggestion, and metadata operations."""
+
+    search_youtube = staticmethod(search_youtube)
+    get_video_info = staticmethod(get_video_info)
+    get_stream_url = staticmethod(get_stream_url)
+    get_search_suggestions = staticmethod(get_search_suggestions)
+    get_youtube_suggestions = staticmethod(get_search_suggestions)
+    get_related_videos = staticmethod(get_related_videos)
+    get_language_versions = staticmethod(get_language_versions)
+    search_multi_language = staticmethod(search_multi_language)
+    get_trending_multi_language = staticmethod(get_trending_multi_language)

@@ -158,30 +158,56 @@ const Auth = {
         AppState.isAuthenticated = true;
     },
 
+    _refreshPromise: null,
+
     async refreshToken() {
         const refreshToken = localStorage.getItem('wave_refresh_token');
-        if (!refreshToken) return false;
-
-        try {
-            const response = await fetch(`${API.baseUrl || ''}/api/auth/refresh`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ refresh_token: refreshToken }),
-            });
-
-            if (response.ok) {
-                const data = await response.json();
-                this.saveSession(data);
-                return true;
-            }
-        } catch (error) {
-            console.error('Token refresh failed:', error);
+        if (!refreshToken) {
+            this.logout();
+            return false;
         }
 
-        return false;
+        if (this._refreshPromise) {
+            return this._refreshPromise;
+        }
+
+        this._refreshPromise = (async () => {
+            try {
+                const response = await fetch(`${API.baseUrl || ''}/api/auth/refresh`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ refresh_token: refreshToken }),
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    this.saveSession(data);
+                    return true;
+                } else {
+                    this.logout();
+                    return false;
+                }
+            } catch (error) {
+                console.error('Token refresh network error:', error);
+                return false;
+            } finally {
+                this._refreshPromise = null;
+            }
+        })();
+
+        return this._refreshPromise;
     },
 
     logout() {
+        const refreshToken = localStorage.getItem('wave_refresh_token');
+        if (refreshToken) {
+            fetch(`${API.baseUrl || ''}/api/auth/logout`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ refresh_token: refreshToken }),
+            }).catch(() => {});
+        }
+
         localStorage.removeItem('wave_access_token');
         localStorage.removeItem('wave_refresh_token');
         localStorage.removeItem('wave_user');
