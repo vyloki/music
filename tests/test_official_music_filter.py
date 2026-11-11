@@ -211,6 +211,27 @@ class TestOfficialMusicFilter(unittest.TestCase):
         movie_track = dict(valid_track, title="Chuttamalle Vachesindi Full Movie", duration=18000)
         self.assertFalse(is_valid_single_song(movie_track))
 
+        # 9. Screenshot cases: Compilations and unofficial feeds
+        compilation_feed_tracks = [
+            {"title": "Top 100 Hits Music Spotify 2026", "duration": 9023, "channel": "JsVibes Music"},
+            {"title": "Top 20 Trending Songs 2026", "duration": 4554, "channel": "Grow Music"},
+            {"title": "Trending Songs 2026", "duration": 3172, "channel": "Grow Music"},
+            {"title": "Best Romantic Songs 2026", "duration": 3421, "channel": "Top Playlist Songs"},
+            {"title": "Best Of Bollywood Dance Jukebox", "duration": 5400, "channel": "Non Stop Bollywood"},
+            {"title": "Pop Music 2025 - Top Pop Songs", "duration": 7495, "channel": "Trending Hits Daily"},
+            {"title": "Top Hits 2026 Ed Sheeran, Shakira", "duration": 11372, "channel": "TimeFlow Rhythm"},
+            {"title": "lofi hip hop radio beats to relax", "duration": 0, "channel": "Lofi Girl"},
+            {"title": "Top 30 Telugu Hits - Audio Playlist | Part-1", "duration": 7471, "channel": "Part-1"},
+            {"title": "Chali Gaali Chuudduu", "duration": 220, "channel": "Nani Hit Official"},
+            {"title": "Aaya Sher - Audio Song", "duration": 210, "channel": "The Paradise"},
+        ]
+        for t in compilation_feed_tracks:
+            # Must be rejected either by duration, title compilation pattern, or strict official check
+            self.assertFalse(
+                is_valid_single_song(t, strict_official=True),
+                f"Expected feed compilation '{t['title']}' from '{t['channel']}' to be rejected"
+            )
+
     def test_official_scoring_priority(self):
         """Official releases from recognized channels must score higher than unknown uploads."""
         official_track = {

@@ -117,7 +117,10 @@ UNOFFICIAL_CHANNELS = [
     "public talk", "vlog", "vlogs", "troll", "comedy", "scenes", "clips", "shorts",
     "night vibe", "lofi zone", "lofi", "chill vibe", "vibes only", "song lyrics", "musical bytes",
     "musical haven", "jukebox world", "playlist hub", "playlist", "mix labs", "audio hub",
-    "lyric video", "lyrics video"
+    "lyric video", "lyrics video", "romantic songs", "top trending", "top playlist", "non stop",
+    "top bollywood", "top pop", "billboard top", "chill lofi", "lofi girl", "chilli music",
+    "the paradise", "part-1", "part-2", "hit official", "trending hits daily", "timeflow rhythm",
+    "grow music", "jsvibes music", "top hits"
 ]
 
 # Patterns for compilation, jukebox, playlist, or movie videos
@@ -134,7 +137,15 @@ COMPILATION_PATTERNS = [
     r"\bslowed\s*(\+|\&)?\s*reverb\b", r"\bbass boosted\b", r"\b8d audio\b", r"\b3d audio\b",
     r"\bwhatsapp status\b", r"\bstatus video\b", r"\bdance cover\b", r"\breaction\b",
     r"\bfan made\b", r"\bedit audio\b", r"\b1 hour loop\b", r"\b10 hours\b",
-    r"\b1 hour version\b", r"\bloop\b", r"\bdj remix\b", r"\bmashup\b"
+    r"\b1 hour version\b", r"\bloop\b", r"\bdj remix\b", r"\bmashup\b",
+    r"\b\d+\s*trending\s*songs\b", r"\bpop\s*music\s*\d{4}\b", r"\btop\s*hits\s*\d{4}\b",
+    r"\bpopular\s*songs\s*\d{4}\b", r"\bbollywood\s*songs\s*\d{4}\b", r"\bspotify\s*\d{4}\b",
+    r"\bspotify\s*hits\b", r"\bno\s*ads\b", r"\bthis\s*week\b", r"\bultimate\s*playlist\b",
+    r"\bchill\s*lofi\b", r"\blofi\s*beats\b", r"\blofi\s*mix\b", r"\bbeats\s*to\s*relax\b",
+    r"\bstress\s*relief\b", r"\bmeditation\s*music\b", r"\bbest\s*romantic\s*songs\b",
+    r"\blatest\s*romantic\s*songs\b", r"\btop\s*playlist\s*songs\b", r"\bbollywood\s*romance\b",
+    r"\btop\s*\d+\s*hits\b", r"\btop\s*\d+\s*bollywood\b", r"\btop\s*\d+\s*telugu\b",
+    r"\btop\s*\d+\s*tamil\b"
 ]
 
 
@@ -206,13 +217,15 @@ def is_compilation_or_junk(title: str, duration: int = 0) -> bool:
     return False
 
 
-def is_valid_single_song(track: dict) -> bool:
+def is_valid_single_song(track: dict, strict_official: bool = False) -> bool:
     """
     Validates that a track is a genuine single song:
-    - Duration between MIN_SONG_DURATION (45s) and MAX_SONG_DURATION (360s, or 0 if unprobed)
+    - Duration between MIN_SONG_DURATION (45s) and MAX_SONG_DURATION (360s)
     - Not a compilation, jukebox, full album, or movie
     - Not from an unofficial channel (editz, status, slowed, fan made, etc.)
     - track_type is 'song' or 'bgm' (not 'playlist')
+    - If strict_official=True: MUST be from an official record label, Topic channel,
+      VEVO, or verified celebrity artist.
     """
     if not track or not isinstance(track, dict):
         return False
@@ -229,6 +242,10 @@ def is_valid_single_song(track: dict) -> bool:
         return False
     if track.get("track_type") == "playlist":
         return False
+    if strict_official:
+        is_official = track.get("is_official") or is_official_music_source(uploader, title)
+        if not is_official:
+            return False
     return True
 
 
@@ -820,7 +837,17 @@ async def get_stream_url(video_id: str) -> Optional[dict]:
 
 
 async def get_search_suggestions(query: str) -> List[str]:
-    """Get clean, music-focused YouTube search autocomplete suggestions (Spotify style)."""
+    """Get clean, music-focused YouTube search autocomplete suggestions (Spotify style). Cached via L1."""
+    if not query or len(query.strip()) < 2:
+        return []
+
+    from app.utils.cache import search_l1_cache
+    norm_q = query.lower().strip()
+    cache_key = f"sug:{norm_q}"
+    cached = search_l1_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     blocked_terms = [
         "trailer", "teaser", "review", "reaction", "full movie", "movie review",
         "movie scenes", "scene", "scenes", "comedy", "interview", "press meet",
@@ -877,7 +904,9 @@ async def get_search_suggestions(query: str) -> List[str]:
                         seen.add(s_clean.lower())
                         cleaned_list.append(s_clean)
 
-                return cleaned_list[:8]
+                final_suggestions = cleaned_list[:8]
+                search_l1_cache.set(cache_key, final_suggestions, ttl=1800.0)
+                return final_suggestions
     except Exception as e:
         logger.warning(f"Suggestions error for '{query}': {e}")
 

@@ -4,8 +4,8 @@ Loads settings from .env file using Pydantic Settings.
 """
 
 from pydantic_settings import BaseSettings
-from pydantic import Field, AliasChoices
-from typing import List
+from pydantic import Field, AliasChoices, field_validator
+from typing import List, Union
 
 
 class Settings(BaseSettings):
@@ -14,7 +14,20 @@ class Settings(BaseSettings):
     # Application
     app_name: str = Field(default="Wave", alias="APP_NAME")
     app_version: str = Field(default="1.0.0", alias="APP_VERSION")
-    debug: bool = Field(default=True, alias="DEBUG")
+    debug: bool = Field(default=False, alias="DEBUG")
+
+    @field_validator("debug", mode="before")
+    @classmethod
+    def parse_debug(cls, v):
+        if isinstance(v, str):
+            v_low = v.strip().lower()
+            if v_low in ("true", "1", "yes", "on", "t"):
+                return True
+            if v_low in ("false", "0", "no", "off", "f"):
+                return False
+            # Handle non-boolean strings like log levels "WARN", "INFO" safely in production
+            return False
+        return bool(v)
     host: str = Field(default="0.0.0.0", alias="HOST")
     port: int = Field(default=8000, alias="PORT")
 

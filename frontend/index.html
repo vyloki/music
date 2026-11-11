@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <meta name="description" content="Wave — Your Personal Music Streaming App. Search, play, and discover music from around the world.">
-    <meta name="theme-color" content="#f5f0e8">
+    <meta name="theme-color" content="#08090d">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -26,9 +26,9 @@
     <link rel="icon" type="image/png" href="/static/icons/icon-192.png">
 
     <!-- Stylesheets -->
-    <link rel="stylesheet" href="/static/css/index.css?v=5.0">
-    <link rel="stylesheet" href="/static/css/player.css?v=5.0">
-    <link rel="stylesheet" href="/static/css/animations.css?v=5.0">
+    <link rel="stylesheet" href="/static/css/index.css?v=12.0">
+    <link rel="stylesheet" href="/static/css/player.css?v=12.0">
+    <link rel="stylesheet" href="/static/css/animations.css?v=12.0">
 </head>
 <body>
     <!-- ============================== -->
@@ -544,9 +544,9 @@
                 <div class="extract-container">
                     <!-- Supported Platforms Pills -->
                     <div class="extract-platforms">
-                        <span class="platform-pill"><i data-lucide="youtube"></i> YouTube / Shorts</span>
-                        <span class="platform-pill"><i data-lucide="instagram"></i> Instagram Reels</span>
-                        <span class="platform-pill"><i data-lucide="twitter"></i> Twitter / X</span>
+                        <span class="platform-pill"><i data-lucide="video"></i> YouTube / Shorts</span>
+                        <span class="platform-pill"><i data-lucide="camera"></i> Instagram Reels</span>
+                        <span class="platform-pill"><i data-lucide="share-2"></i> Twitter / X</span>
                         <span class="platform-pill"><i data-lucide="video"></i> TikTok</span>
                         <span class="platform-pill"><i data-lucide="globe"></i> Any Web Link</span>
                     </div>
@@ -766,16 +766,9 @@
             </div>
         </div>
 
-        <!-- Sub-bar containing Language Switcher + Real-time Sync Calibration (Desktop / Fallback) -->
+        <!-- Sub-bar containing Language Switcher (Desktop / Fallback) -->
         <div class="lyrics-toolbar" id="lyrics-toolbar">
             <div class="lyrics-lang-bar hidden" id="lyrics-lang-switcher"></div>
-            <div class="lyrics-sync-controls hidden" id="lyrics-sync-controls" title="Calibrate lyrics sync timing">
-                <span class="sync-label">Sync:</span>
-                <button class="btn-sync-offset" onclick="Lyrics.adjustOffset(-0.5)" title="Lyrics moving too slow / late (-0.5s)">-0.5s</button>
-                <span class="sync-value" id="sync-offset-val">0.0s</span>
-                <button class="btn-sync-offset" onclick="Lyrics.adjustOffset(0.5)" title="Lyrics moving too fast / early (+0.5s)">+0.5s</button>
-                <button class="btn-sync-reset" id="btn-sync-reset" onclick="Lyrics.resetOffset()" title="Reset timing">Reset</button>
-            </div>
         </div>
 
         <!-- Lyrics Body Container (Scrollable lines with spotlight highlight) -->
@@ -848,25 +841,6 @@
             </div>
 
             <div class="lyrics-more-body">
-                <!-- Sync Calibration Section -->
-                <div class="lyrics-sheet-section">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                        <span class="lyrics-sheet-label" style="margin: 0;"><i data-lucide="sliders"></i> Lyrics Timing Sync</span>
-                        <span class="sync-value" id="lyrics-sheet-sync-val" style="font-size: 13px; font-weight: 700; color: var(--accent-dark);">0.0s</span>
-                    </div>
-                    <div class="lyrics-sheet-sync-controls" style="flex-wrap: wrap; gap: 6px;">
-                        <button class="btn-sync-offset" onclick="Lyrics.adjustOffset(-2.0)" title="Delay 2 Lines (-2.0s)">-2.0s</button>
-                        <button class="btn-sync-offset" onclick="Lyrics.adjustOffset(-1.0)" title="Delay 1 Line (-1.0s)">-1.0s</button>
-                        <button class="btn-sync-offset" onclick="Lyrics.adjustOffset(-0.5)" title="Delay (-0.5s)">-0.5s</button>
-                        <button class="btn-sync-offset" onclick="Lyrics.adjustOffset(-0.1)" title="Delay (-0.1s)">-0.1s</button>
-                        <button class="btn-sync-offset" onclick="Lyrics.adjustOffset(0.1)" title="Advance (+0.1s)">+0.1s</button>
-                        <button class="btn-sync-offset" onclick="Lyrics.adjustOffset(0.5)" title="Advance (+0.5s)">+0.5s</button>
-                        <button class="btn-sync-offset" onclick="Lyrics.adjustOffset(1.0)" title="Advance (+1.0s)">+1.0s</button>
-                        <button class="btn-sync-offset" onclick="Lyrics.adjustOffset(2.0)" title="Advance (+2.0s)">+2.0s</button>
-                        <button class="btn-sync-reset" onclick="Lyrics.resetOffset()" title="Reset timing">Reset (0.0s)</button>
-                    </div>
-                </div>
-
                 <!-- Language Versions Switcher Section -->
                 <div class="lyrics-sheet-section hidden" id="lyrics-sheet-lang-section">
                     <span class="lyrics-sheet-label"><i data-lucide="languages"></i> Available Languages</span>
@@ -926,18 +900,22 @@
             caches.keys().then((keys) => keys.forEach((k) => caches.delete(k)));
         }
     </script>
-    <script src="/static/js/app.js?v=10.0"></script>
-    <script src="/static/js/auth.js?v=10.0"></script>
-    <script src="/static/js/player.js?v=10.0"></script>
-    <script src="/static/js/library.js?v=10.0"></script>
-    <script src="/static/js/extract.js?v=10.0"></script>
-    <script src="/static/js/lyrics.js?v=10.0"></script>
-    <script src="/static/js/local_import.js?v=10.0"></script>
-    <script src="/static/js/visualizer.js?v=10.0"></script>
+    <script src="/static/js/app.js?v=12.0"></script>
+    <script src="/static/js/auth.js?v=12.0"></script>
+    <script src="/static/js/player.js?v=12.0"></script>
+    <script src="/static/js/library.js?v=12.0"></script>
+    <script src="/static/js/extract.js?v=12.0"></script>
+    <script src="/static/js/lyrics.js?v=12.0"></script>
+    <script src="/static/js/local_import.js?v=12.0"></script>
+    <script src="/static/js/visualizer.js?v=12.0"></script>
 
     <script>
         document.addEventListener('DOMContentLoaded', () => {
-            lucide.createIcons();
+            if (typeof safeCreateIcons === 'function') {
+                safeCreateIcons({ nodes: [document.body] });
+            } else if (typeof lucide !== 'undefined' && lucide.createIcons) {
+                lucide.createIcons();
+            }
         });
     </script>
 </body>

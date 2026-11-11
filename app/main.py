@@ -120,8 +120,8 @@ app.include_router(artists.router)
 app.include_router(songs.router)
 app.include_router(extract.router)
 
-# Health check endpoint
-@app.get("/api/health", tags=["System"])
+# Health check endpoint (supports both GET and HEAD for Render / UptimeRobot / cron monitors)
+@app.api_route("/api/health", methods=["GET", "HEAD"], tags=["System"])
 async def health_check():
     """Health check endpoint to verify the server and database are running."""
     cached = health_cache.get("health")
@@ -155,6 +155,18 @@ async def invalid_id_handler(request: Request, exc: InvalidId):
     )
 
 
+# No-cache middleware for static frontend assets and SPA HTML to guarantee fresh execution
+@app.middleware("http")
+async def no_cache_static_middleware(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/static/") or path in ("/", "/index.html", "/frontend/index.html", "/sw.js", "/manifest.json"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 # --- Static Files & Frontend Serving ---
 # Serve the frontend directory as static files
 frontend_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
@@ -175,7 +187,14 @@ if os.path.exists(frontend_dir):
         """Serve the frontend SPA."""
         index_path = os.path.join(frontend_dir, "index.html")
         if os.path.exists(index_path):
-            return FileResponse(index_path)
+            return FileResponse(
+                index_path,
+                headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
         return {"message": "🎵 Wave API is running. Frontend not found."}
 
     @app.get("/manifest.json", include_in_schema=False)

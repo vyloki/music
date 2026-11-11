@@ -141,8 +141,9 @@ const Visualizer = {
 document.addEventListener('DOMContentLoaded', () => {
     Visualizer.init();
 
-    if (Player?.audio) {
-        Player.audio.addEventListener('play', () => {
+    const p = window.Player || (typeof Player !== 'undefined' ? Player : null);
+    if (p?.audio) {
+        p.audio.addEventListener('play', () => {
             if (Visualizer.isMobile) return; // No visualizer on mobile
             if (!Visualizer.connected) {
                 Visualizer.connectToPlayer();
@@ -150,7 +151,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 Visualizer.start();
             }
         });
-        Player.audio.addEventListener('pause', () => {
+        p.audio.addEventListener('pause', () => {
             if (Visualizer.isMobile) return;
             Visualizer.stop();
         });

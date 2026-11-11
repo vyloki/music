@@ -242,21 +242,35 @@ const Auth = {
         }
     },
 
-    // Sync any guest played tracks to MongoDB Atlas
+    _hasSyncedHistory: false,
+
+    // Sync any guest played tracks to MongoDB Atlas via single atomic batch endpoint
     async syncLocalHistoryToCloud() {
+        if (this._hasSyncedHistory) return;
+        this._hasSyncedHistory = true;
+
         try {
             const raw = localStorage.getItem('wave_recently_played');
-            if (raw) {
-                const list = JSON.parse(raw);
-                for (const t of list.slice(0, 10)) {
-                    API.post('/api/history', {
-                        video_id: t.video_id,
-                        title: t.title || t.track_name || 'Unknown',
-                        artist: t.artist || 'Unknown',
-                        thumbnail: t.thumbnail || t.album_art || '',
-                    }).catch(() => {});
-                }
-            }
+            if (!raw) return;
+            const list = JSON.parse(raw);
+            if (!Array.isArray(list) || list.length === 0) return;
+
+            const entries = list.slice(0, 10).map(t => ({
+                video_id: t.video_id,
+                title: t.title || t.track_name || 'Unknown',
+                artist: t.artist || 'Unknown',
+                thumbnail: t.thumbnail || t.album_art || '',
+                duration: t.duration || 0,
+                movie: t.movie || '',
+                language: t.language || '',
+                subtitle: t.subtitle || ''
+            })).filter(e => e.video_id);
+
+            if (entries.length === 0) return;
+
+            await API.post('/api/history/batch', { entries }).catch(() => {});
         } catch {}
     }
 };
+
+window.Auth = Auth;

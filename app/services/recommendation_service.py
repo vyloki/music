@@ -31,14 +31,14 @@ logger = logging.getLogger(__name__)
 
 # Predefined categories for quick browsing with official audio queries
 CATEGORIES = [
-    {"id": "trending", "name": "Trending Hits", "query": "Top trending songs official audio", "icon": "flame"},
-    {"id": "telugu", "name": "Telugu Hits", "query": "Latest Telugu hit songs official audio", "icon": "music-2"},
-    {"id": "hindi", "name": "Bollywood Top", "query": "Top Bollywood romantic songs official audio", "icon": "sparkles"},
-    {"id": "english", "name": "Global Pop", "query": "Billboard top hits pop songs official audio", "icon": "globe"},
-    {"id": "punjabi", "name": "Punjabi Beats", "query": "Top trending Punjabi songs official audio", "icon": "zap"},
-    {"id": "tamil", "name": "Tamil Hits", "query": "Latest Tamil blockbuster songs official audio", "icon": "disc"},
-    {"id": "lofi", "name": "Chill & Lo-Fi", "query": "Chill lofi hip hop beats to relax", "icon": "coffee"},
-    {"id": "rock", "name": "Rock & Indie", "query": "Indie rock top tracks official audio", "icon": "guitar"},
+    {"id": "trending", "name": "Trending Hits", "query": "Trending official song T-Series Aditya Music Sony Music Saregama", "icon": "flame"},
+    {"id": "telugu", "name": "Telugu Hits", "query": "Aditya Music Telugu hit official song", "icon": "music-2"},
+    {"id": "hindi", "name": "Bollywood Top", "query": "T-Series Bollywood hit official song", "icon": "sparkles"},
+    {"id": "english", "name": "Global Pop", "query": "VEVO global hit official music video", "icon": "globe"},
+    {"id": "punjabi", "name": "Punjabi Beats", "query": "Speed Records T-Series Apna Punjab official song", "icon": "zap"},
+    {"id": "tamil", "name": "Tamil Hits", "query": "Sony Music South Tamil hit official song", "icon": "disc"},
+    {"id": "lofi", "name": "Acoustic & Chill", "query": "Anirudh Sid Sriram Arijit acoustic official song", "icon": "coffee"},
+    {"id": "rock", "name": "Rock & Indie", "query": "Sony Music Indie official music video", "icon": "guitar"},
 ]
 
 
@@ -375,12 +375,22 @@ async def get_personalized_home_feed(user_id: Optional[str] = None) -> dict:
         except Exception as e:
             logger.debug(f"User profile inference error: {e}")
 
-    # Build queries with official audio markers
-    mood_query = time_ctx["query_template"].format(lang=preferred_lang)
-    for_you_query = f"{top_artist} {preferred_lang} hit songs official audio" if top_artist else f"{preferred_lang} super hit songs official audio"
+    # Build queries with official audio markers and record labels
+    if preferred_lang == "Telugu":
+        mood_query = f"Aditya Music Saregama Telugu {time_ctx.get('keyword', 'hit')} official song"
+        for_you_query = f"Aditya Music {top_artist} Telugu official song" if top_artist else "Aditya Music Saregama Telugu blockbuster official song"
+    elif preferred_lang == "Tamil":
+        mood_query = f"Sony Music South Tamil {time_ctx.get('keyword', 'hit')} official song"
+        for_you_query = f"Sony Music South {top_artist} Tamil official song" if top_artist else "Sony Music South Anirudh Tamil official song"
+    elif preferred_lang == "Hindi":
+        mood_query = f"T-Series Sony Music Hindi {time_ctx.get('keyword', 'hit')} official song"
+        for_you_query = f"T-Series {top_artist} Hindi official song" if top_artist else "T-Series Arijit Singh Hindi official song"
+    else:
+        mood_query = f"VEVO {preferred_lang} {time_ctx.get('keyword', 'hit')} official song"
+        for_you_query = f"VEVO {top_artist} official music video" if top_artist else f"VEVO {preferred_lang} official music video"
 
-    mood_task = search_youtube(mood_query, max_results=10, filter_mode="song")
-    for_you_task = search_youtube(for_you_query, max_results=10, filter_mode="song")
+    mood_task = search_youtube(mood_query, max_results=12, filter_mode="song")
+    for_you_task = search_youtube(for_you_query, max_results=12, filter_mode="song")
     trending_task = get_trending_tracks("trending", 10)
     telugu_task = get_trending_tracks("telugu", 10)
     hindi_task = get_trending_tracks("hindi", 10)
@@ -392,13 +402,13 @@ async def get_personalized_home_feed(user_id: Optional[str] = None) -> dict:
         return_exceptions=True
     )
 
-    mood_tracks = [t for t in results[0] if is_valid_single_song(t)] if isinstance(results[0], list) else []
-    for_you_tracks = [t for t in results[1] if is_valid_single_song(t)] if isinstance(results[1], list) else []
-    trending_tracks = results[2] if isinstance(results[2], list) else []
-    telugu_tracks = results[3] if isinstance(results[3], list) else []
-    hindi_tracks = results[4] if isinstance(results[4], list) else []
-    english_tracks = results[5] if isinstance(results[5], list) else []
-    lofi_tracks = results[6] if isinstance(results[6], list) else []
+    mood_tracks = [t for t in results[0] if is_valid_single_song(t, strict_official=True)] if isinstance(results[0], list) else []
+    for_you_tracks = [t for t in results[1] if is_valid_single_song(t, strict_official=True)] if isinstance(results[1], list) else []
+    trending_tracks = [t for t in results[2] if is_valid_single_song(t, strict_official=True)] if isinstance(results[2], list) else []
+    telugu_tracks = [t for t in results[3] if is_valid_single_song(t, strict_official=True)] if isinstance(results[3], list) else []
+    hindi_tracks = [t for t in results[4] if is_valid_single_song(t, strict_official=True)] if isinstance(results[4], list) else []
+    english_tracks = [t for t in results[5] if is_valid_single_song(t, strict_official=True)] if isinstance(results[5], list) else []
+    lofi_tracks = [t for t in results[6] if is_valid_single_song(t, strict_official=True)] if isinstance(results[6], list) else []
 
     feed_data = {
         "time_context": time_ctx,
@@ -421,7 +431,7 @@ async def get_personalized_home_feed(user_id: Optional[str] = None) -> dict:
 # =====================================================================
 
 async def get_trending_tracks(category: str = "trending", limit: int = 15) -> List[dict]:
-    """Get trending tracks for a given category with MongoDB caching."""
+    """Get trending tracks for a given category with MongoDB caching and strict official validation."""
     db = database.db
     cache_key = f"feed:{category}:{limit}"
 
@@ -432,14 +442,17 @@ async def get_trending_tracks(category: str = "trending", limit: int = 15) -> Li
                 "cached_at": {"$gt": datetime.now(timezone.utc) - timedelta(hours=6)}
             })
             if cached and cached.get("tracks"):
-                return cached["tracks"]
+                # Strict validation of cached documents to prevent multi-hour compilations from slipping through
+                valid_cached = [t for t in cached["tracks"] if is_valid_single_song(t, strict_official=True)]
+                if len(valid_cached) >= min(limit, 5):
+                    return valid_cached[:limit]
         except Exception:
             pass
 
     cat_info = next((c for c in CATEGORIES if c["id"] == category), CATEGORIES[0])
     query = cat_info["query"]
-    raw_tracks = await search_youtube(query, max_results=limit, filter_mode="song")
-    tracks = [t for t in raw_tracks if is_valid_single_song(t)]
+    raw_tracks = await search_youtube(query, max_results=max(limit * 2, 20), filter_mode="song")
+    tracks = [t for t in raw_tracks if is_valid_single_song(t, strict_official=True)][:limit]
 
     if db is not None and tracks:
         try:

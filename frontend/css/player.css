@@ -12,7 +12,7 @@
     flex-direction: column;
     z-index: 60;
     position: relative;
-    box-shadow: 0 -4px 24px rgba(44, 36, 24, 0.06);
+    box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.5);
 }
 
 /* --- Progress Bar --- */
@@ -74,7 +74,8 @@
     height: 100%;
     gap: var(--space-md);
     width: 100%;
-    max-width: 100%;
+    max-width: 1720px;
+    margin: 0 auto;
     overflow: hidden;
 }
 
@@ -252,11 +253,11 @@
 }
 
 .lang-pill.active {
-    background: var(--accent-dark);
-    border-color: var(--accent-dark);
+    background: var(--accent-primary);
+    border-color: var(--accent-primary);
     color: #ffffff !important;
     font-weight: 700;
-    box-shadow: 0 2px 6px rgba(44, 36, 24, 0.22);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
 }
 
 /* --- Player Controls (Center) --- */
@@ -396,7 +397,7 @@
     flex-direction: column;
     animation: slideUp 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     overflow: hidden;
-    box-shadow: 0 -2px 10px rgba(44, 36, 24, 0.04);
+    box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.4);
 }
 
 .lyrics-overlay.hidden {
@@ -549,7 +550,7 @@
 
 .lyrics-line:hover {
     color: var(--text-secondary);
-    background: rgba(194, 175, 148, 0.08);
+    background: rgba(255, 255, 255, 0.05);
 }
 
 .lyrics-line.active {
@@ -680,7 +681,7 @@
     .player-inner {
         padding: var(--space-xs) var(--space-md);
         gap: var(--space-sm);
-        grid-template-columns: minmax(180px, 1fr) auto minmax(160px, 1fr);
+        grid-template-columns: minmax(180px, 1fr) auto minmax(170px, 1fr);
     }
 
     .lang-switcher-bar {
@@ -696,7 +697,9 @@
     }
 
     .time-display {
-        display: none;
+        display: inline-flex;
+        font-size: 11px;
+        color: var(--text-tertiary);
     }
 }
 
@@ -706,17 +709,18 @@
 @media (max-width: 768px) {
     .player-bar {
         position: fixed;
-        bottom: var(--mobile-nav-height);
+        bottom: calc(var(--mobile-nav-height) + var(--safe-bottom) + 8px);
         left: 8px;
         right: 8px;
-        height: 60px;
+        height: 58px;
         border-radius: var(--radius-lg);
-        background: var(--bg-elevated);
-        backdrop-filter: blur(16px);
+        background: rgba(24, 27, 40, 0.96);
+        backdrop-filter: blur(20px);
+        -webkit-backdrop-filter: blur(20px);
         border: 1px solid var(--border-default);
         box-shadow: var(--shadow-lg);
         z-index: 95;
-        margin-bottom: 6px;
+        margin-bottom: 0;
     }
 
     .progress-container {
@@ -958,10 +962,13 @@
 
     .lyrics-header-actions .badge {
         font-size: 10px;
-        padding: 3px 8px;
-        background: var(--bg-elevated);
+        padding: 2px 6px;
+        background: transparent;
         border: 1px solid var(--border-subtle);
-        border-radius: var(--radius-full);
+        border-radius: var(--radius-sm);
+        color: var(--text-tertiary);
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
     }
 
     #lyrics-track-name {

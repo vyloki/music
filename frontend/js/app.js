@@ -4,6 +4,31 @@
  * artist profiles, and persistent recently played rendering.
  */
 
+// Safe Lucide icon initializer that never throws and automatically sanitizes unsupported icon names
+var safeCreateIcons = window.safeCreateIcons = function safeCreateIcons(options) {
+    if (typeof lucide !== 'undefined' && lucide && typeof lucide.createIcons === 'function') {
+        try {
+            // Defensive sanitization: replace missing/unsupported icons with 'music' to avoid console spam
+            const scope = options?.nodes || [document.body];
+            for (const root of scope) {
+                if (!root || !root.querySelectorAll) continue;
+                const els = root.querySelectorAll('[data-lucide]');
+                for (const el of els) {
+                    const name = el.getAttribute('data-lucide');
+                    if (!name) continue;
+                    const pascal = name.replace(/(^\w|-\w)/g, m => m.replace('-', '').toUpperCase());
+                    if (lucide.icons && !lucide.icons[pascal]) {
+                        el.setAttribute('data-lucide', 'music');
+                    }
+                }
+            }
+            lucide.createIcons(options);
+        } catch (e) {
+            console.warn('Lucide icon rendering skipped:', e);
+        }
+    }
+};
+
 // ============================================
 // API Client with Multi-Backend Automatic Failover
 // ============================================
@@ -85,10 +110,11 @@ const API = {
         return headers;
     },
 
-    async request(method, url, body = null, attempt = 0) {
+    async request(method, url, body = null, attempt = 0, fetchOptions = {}) {
         const options = {
             method,
             headers: this.getHeaders(),
+            ...fetchOptions,
         };
         if (body) {
             options.body = JSON.stringify(body);
@@ -113,7 +139,7 @@ const API = {
             if (response.status >= 502 && response.status <= 504) {
                 if (attempt < (this.nodes.length || 1) && this.rotateServer()) {
                     showToast('Switching to backup server...', 'info', 2000);
-                    return await this.request(method, url, body, attempt + 1);
+                    return await this.request(method, url, body, attempt + 1, fetchOptions);
                 }
             }
 
@@ -132,11 +158,16 @@ const API = {
 
             return await response.json();
         } catch (error) {
+            // Respect user-cancelled requests (AbortController)
+            if (error.name === 'AbortError') {
+                throw error;
+            }
+
             // Network failure or connection refused (host offline/suspended)
             const isNetworkError = error.name === 'TypeError' || error.message.includes('fetch') || error.message.includes('NetworkError');
             if (isNetworkError && attempt < (this.nodes.length || 1) && this.rotateServer()) {
                 showToast('Server unavailable. Retrying on standby node...', 'info', 2000);
-                return await this.request(method, url, body, attempt + 1);
+                return await this.request(method, url, body, attempt + 1, fetchOptions);
             }
 
             console.debug(`API Error [${method} ${url}]:`, error);
@@ -144,10 +175,10 @@ const API = {
         }
     },
 
-    get(url) { return this.request('GET', url); },
-    post(url, body) { return this.request('POST', url, body); },
-    put(url, body) { return this.request('PUT', url, body); },
-    delete(url) { return this.request('DELETE', url); },
+    get(url, options = {}) { return this.request('GET', url, null, 0, options); },
+    post(url, body, options = {}) { return this.request('POST', url, body, 0, options); },
+    put(url, body, options = {}) { return this.request('PUT', url, body, 0, options); },
+    delete(url, options = {}) { return this.request('DELETE', url, null, 0, options); },
 };
 
 
@@ -551,7 +582,7 @@ function renderArtistTracks(tracks) {
         </div>
     `;
 
-    lucide.createIcons({ nodes: [listEl] });
+    safeCreateIcons({ nodes: [listEl] });
 }
 
 function playTrackFromArtist(index) {
@@ -613,69 +644,99 @@ async function loadCategoryTracks(categoryId) {
 // Dual-Layer Recently Played (Local + Cloud)
 // ============================================
 
-async function loadHomeRecentlyPlayed() {
+let homeRecentlyPlayedInFlight = null;
+let homeRecentlyPlayedCache = null;
+let homeRecentlyPlayedCacheTime = 0;
+
+async function loadHomeRecentlyPlayed(forceRefresh = false) {
     const container = document.getElementById('recent-scroll');
     if (!container) return;
 
-    let tracks = [];
+    const now = Date.now();
+    // Use in-memory cache if fresh within 15 seconds (prevents redundant fetches across tab switches)
+    if (!forceRefresh && homeRecentlyPlayedCache && (now - homeRecentlyPlayedCacheTime < 15000)) {
+        renderTrackCards(homeRecentlyPlayedCache, 'recent-scroll');
+        return;
+    }
 
-    // 1. First load from localStorage (instant, never lost across logouts)
-    try {
-        const raw = localStorage.getItem('wave_recently_played');
-        if (raw) {
-            tracks = JSON.parse(raw);
-        }
-    } catch (e) {}
+    // Deduplicate simultaneous in-flight calls on page startup
+    if (homeRecentlyPlayedInFlight) {
+        return homeRecentlyPlayedInFlight;
+    }
 
-    // 2. If authenticated, attempt to fetch from MongoDB Atlas
-    if (AppState.isAuthenticated) {
+    homeRecentlyPlayedInFlight = (async () => {
+        let tracks = [];
+
+        // 1. First load from localStorage (instant, never lost across logouts)
         try {
-            const data = await API.get('/api/history?limit=10');
-            if (data && data.history && data.history.length > 0) {
-                const cloudTracks = data.history.map(h => ({
-                    video_id: h.video_id,
-                    title: h.title,
-                    track_name: h.title,
-                    artist: h.artist,
-                    thumbnail: h.thumbnail,
-                    album_art: h.thumbnail,
-                    duration: 0,
-                    // Include frozen display metadata from DB so rendering never re-parses
-                    movie: h.movie || '',
-                    language: h.language || '',
-                    subtitle: h.subtitle || '',
-                }));
-
-                // Merge deduplicating by video_id (local first, then cloud)
-                const seen = new Set();
-                const merged = [];
-                for (const t of [...tracks, ...cloudTracks]) {
-                    if (t && t.video_id && !seen.has(t.video_id)) {
-                        seen.add(t.video_id);
-                        merged.push(t);
-                    }
-                }
-                tracks = merged.slice(0, 15);
-
-                // Persist merged result to localStorage for offline resilience
-                try {
-                    localStorage.setItem('wave_recently_played', JSON.stringify(tracks));
-                } catch (e) {}
+            const raw = localStorage.getItem('wave_recently_played');
+            if (raw) {
+                tracks = JSON.parse(raw);
             }
         } catch (e) {}
-    }
 
-    if (tracks.length > 0) {
-        renderTrackCards(tracks, 'recent-scroll');
-    } else {
-        container.innerHTML = `
-            <div class="empty-state-card">
-                <i data-lucide="music"></i>
-                <p>Play a song to see it here</p>
-            </div>
-        `;
-        lucide.createIcons({ nodes: [container] });
-    }
+        // Render immediately from local storage for zero-delay UI
+        if (tracks.length > 0) {
+            renderTrackCards(tracks, 'recent-scroll');
+        }
+
+        // 2. If authenticated, attempt to fetch from MongoDB Atlas
+        if (AppState.isAuthenticated) {
+            try {
+                const data = await API.get('/api/history?limit=10');
+                if (data && data.history && data.history.length > 0) {
+                    const cloudTracks = data.history.map(h => ({
+                        video_id: h.video_id,
+                        title: h.title,
+                        track_name: h.title,
+                        artist: h.artist,
+                        thumbnail: h.thumbnail,
+                        album_art: h.thumbnail,
+                        duration: 0,
+                        // Include frozen display metadata from DB so rendering never re-parses
+                        movie: h.movie || '',
+                        language: h.language || '',
+                        subtitle: h.subtitle || '',
+                    }));
+
+                    // Merge deduplicating by video_id (local first, then cloud)
+                    const seen = new Set();
+                    const merged = [];
+                    for (const t of [...tracks, ...cloudTracks]) {
+                        if (t && t.video_id && !seen.has(t.video_id)) {
+                            seen.add(t.video_id);
+                            merged.push(t);
+                        }
+                    }
+                    tracks = merged.slice(0, 15);
+
+                    // Persist merged result to localStorage for offline resilience
+                    try {
+                        localStorage.setItem('wave_recently_played', JSON.stringify(tracks));
+                    } catch (e) {}
+                }
+            } catch (e) {}
+        }
+
+        homeRecentlyPlayedCache = tracks;
+        homeRecentlyPlayedCacheTime = Date.now();
+
+        if (tracks.length > 0) {
+            renderTrackCards(tracks, 'recent-scroll');
+        } else {
+            container.innerHTML = `
+                <div class="empty-state-card">
+                    <i data-lucide="music"></i>
+                    <p>Play a song to see it here</p>
+                </div>
+            `;
+            safeCreateIcons({ nodes: [container] });
+        }
+    })().finally(() => {
+        homeRecentlyPlayedInFlight = null;
+    });
+
+    return homeRecentlyPlayedInFlight;
 }
 
 
@@ -684,11 +745,41 @@ async function loadHomeRecentlyPlayed() {
 // ============================================
 
 let searchDebounceTimer = null;
+let currentSearchAbortController = null;
+let currentSearchPromise = null;
+let activeSearchQuery = null;
 
 async function performSearch(query, updateHash = true) {
     if (!query || query.trim().length === 0) return;
 
     const trimmed = query.trim();
+
+    // 1. In-flight deduplication: return existing promise if identical query is already pending
+    if (AppState.isSearching && activeSearchQuery === trimmed && currentSearchPromise) {
+        return currentSearchPromise;
+    }
+
+    // 2. Abort any previous conflicting in-flight search request
+    if (currentSearchAbortController) {
+        currentSearchAbortController.abort();
+        currentSearchAbortController = null;
+    }
+
+    // 3. Cancel pending suggestion timers and abort any in-flight suggestion requests
+    clearTimeout(searchDebounceTimer);
+    if (typeof currentSuggestionAbortController !== 'undefined' && currentSuggestionAbortController) {
+        currentSuggestionAbortController.abort();
+        currentSuggestionAbortController = null;
+    }
+
+    currentSearchAbortController = new AbortController();
+    const signal = currentSearchAbortController.signal;
+
+    AppState.isSearching = true;
+    activeSearchQuery = trimmed;
+    AppState.lastSearchQuery = trimmed;
+    AppState.activeSearchFilter = 'all';
+
     const resultsContainer = document.getElementById('search-results');
     const loadingEl = document.getElementById('search-loading');
     const suggestionsEl = document.getElementById('search-suggestions');
@@ -704,61 +795,85 @@ async function performSearch(query, updateHash = true) {
     // Reset filter to 'all'
     document.querySelectorAll('.search-filter-btn').forEach(b => b.classList.remove('active'));
     document.querySelector('.search-filter-btn[data-filter="all"]')?.classList.add('active');
-    AppState.activeSearchFilter = 'all';
-    AppState.lastSearchQuery = trimmed;
 
     try {
         sessionStorage.setItem('wave_last_search_query', trimmed);
         sessionStorage.setItem('wave_active_page', 'search');
     } catch (e) {}
 
+    // 4. Update URL without triggering a redundant 'hashchange' -> 'restorePageState' cycle
     if (updateHash) {
-        window.location.hash = '#search?q=' + encodeURIComponent(trimmed);
+        isNavigatingProgrammatically = true;
+        const targetHash = '#search?q=' + encodeURIComponent(trimmed);
+        if (window.location.hash !== targetHash) {
+            try {
+                history.replaceState(null, '', targetHash);
+            } catch (e) {
+                window.location.hash = targetHash;
+            }
+        }
+        setTimeout(() => {
+            isNavigatingProgrammatically = false;
+        }, 200);
     }
 
-    try {
-        const data = await API.get(`/api/search?q=${encodeURIComponent(trimmed)}&limit=30`);
+    currentSearchPromise = (async () => {
+        try {
+            const data = await API.get(`/api/search?q=${encodeURIComponent(trimmed)}&limit=30`, { signal });
 
-        loadingEl?.classList.add('hidden');
+            loadingEl?.classList.add('hidden');
 
-        if (data && data.results && data.results.length > 0) {
-            AppState.searchResults = data.results;
-            try {
-                sessionStorage.setItem('wave_last_search_results', JSON.stringify(data.results));
-            } catch (e) {}
-            filterTabsEl?.classList.remove('hidden');
-            renderSearchResults(data.results, 'all');
-        } else {
+            if (data && data.results && data.results.length > 0) {
+                AppState.searchResults = data.results;
+                try {
+                    sessionStorage.setItem('wave_last_search_results', JSON.stringify(data.results));
+                } catch (e) {}
+                filterTabsEl?.classList.remove('hidden');
+                renderSearchResults(data.results, 'all');
+            } else {
+                resultsContainer.innerHTML = `
+                    <div class="empty-state">
+                        <i data-lucide="search-x"></i>
+                        <p>No results found for "${escapeHtml(trimmed)}"</p>
+                    </div>
+                `;
+                safeCreateIcons({ nodes: [resultsContainer] });
+            }
+        } catch (error) {
+            if (error.name === 'AbortError') {
+                return; // User cancelled or superseded this search
+            }
+            loadingEl?.classList.add('hidden');
             resultsContainer.innerHTML = `
                 <div class="empty-state">
-                    <i data-lucide="search-x"></i>
-                    <p>No results found for "${escapeHtml(trimmed)}"</p>
+                    <i data-lucide="wifi-off"></i>
+                    <p>Search failed. Please verify the Python server is running.</p>
                 </div>
             `;
-            lucide.createIcons({ nodes: [resultsContainer] });
+            safeCreateIcons({ nodes: [resultsContainer] });
+        } finally {
+            AppState.isSearching = false;
+            currentSearchPromise = null;
+            if (activeSearchQuery === trimmed) {
+                activeSearchQuery = null;
+            }
         }
-    } catch (error) {
-        loadingEl?.classList.add('hidden');
-        resultsContainer.innerHTML = `
-            <div class="empty-state">
-                <i data-lucide="wifi-off"></i>
-                <p>Search failed. Please verify the Python server is running.</p>
-            </div>
-        `;
-        lucide.createIcons({ nodes: [resultsContainer] });
-    }
+    })();
+
+    return currentSearchPromise;
 }
 // Classify a track on frontend (fallback if backend didn't classify)
 function classifyTrack(track) {
+    if (!track) return 'song';
+    const dur = parseInt(track.duration, 10) || 0;
     if (track.track_type && ['song', 'bgm', 'playlist'].includes(track.track_type)) {
         if (track.track_type === 'playlist') return 'playlist';
         // Enforce max single song duration (360 seconds / 6 minutes)
-        if (track.duration > 360) return 'playlist';
+        if (dur > 360) return 'playlist';
         return track.track_type;
     }
     // Fallback classification
     const title = (track.title || track.track_name || '').toLowerCase();
-    const dur = track.duration || 0;
     const playlistKw = [
         'jukebox', 'playlist', 'top 10', 'top 20', 'top 30', 'best of', 'collection',
         'hits', 'mashup', 'medley', 'nonstop', 'non stop', 'superhits', 'super hits',
@@ -944,14 +1059,13 @@ function getTrackMetadata(track) {
 // Render a single song row
 function renderSongRow(track, globalIndex) {
     const meta = getTrackMetadata(track);
-    const safeTrack = JSON.stringify({ ...track, track_name: meta.title, movie: meta.movie, language: meta.language, subtitle: meta.subtitle }).replace(/"/g, '&quot;');
     const name = escapeHtml(meta.title);
     const movie = escapeHtml(meta.movie);
     const language = escapeHtml(meta.language);
     const artist = escapeHtml(meta.artist);
 
     const subtitleHtml = meta.movie ? `
-        <span class="track-movie" onclick="event.stopPropagation(); searchForCategory('${movie}')">${movie}</span>
+        <span class="track-movie">${movie}</span>
         ${language ? `<span class="track-lang-dot">•</span><span class="track-lang-text">${language}</span>` : ''}
     ` : (meta.language ? `
         <span class="track-movie">${artist}</span>
@@ -961,7 +1075,7 @@ function renderSongRow(track, globalIndex) {
     `);
 
     return `
-        <div class="track-row" data-video-id="${track.video_id}" onclick="playTrackFromResults(${globalIndex})">
+        <div class="track-row" data-video-id="${track.video_id}" data-search-index="${globalIndex}" onclick="playTrackFromResults(${globalIndex})">
             <div class="track-row-art">
                 <img src="${track.thumbnail || ''}" alt="" loading="lazy" onerror="this.style.display='none'">
             </div>
@@ -971,13 +1085,13 @@ function renderSongRow(track, globalIndex) {
             </div>
             <div class="track-row-duration">${formatDuration(track.duration)}</div>
             <div class="track-row-actions">
-                <button class="btn-icon" onclick="event.stopPropagation(); downloadSong('${track.video_id}','${name}','${movie || artist}')" title="Download">
+                <button class="btn-icon" onclick="event.stopPropagation(); downloadSongByIndex(${globalIndex})" title="Download">
                     <i data-lucide="download"></i>
                 </button>
                 <button class="btn-icon" onclick="event.stopPropagation(); addToQueue(${globalIndex})" title="Add to queue">
                     <i data-lucide="list-plus"></i>
                 </button>
-                <button class="btn-icon" onclick="event.stopPropagation(); Library.openAddToPlaylistModal('${track.video_id}', ${safeTrack})" title="Add to playlist">
+                <button class="btn-icon" onclick="event.stopPropagation(); openAddToPlaylistByIndex(${globalIndex})" title="Add to playlist">
                     <i data-lucide="plus"></i>
                 </button>
             </div>
@@ -1199,7 +1313,7 @@ function renderSearchResults(results, filter) {
 
         if (activeFilter === 'bgm' || activeFilter === 'all') {
             if (bgms.length > 0) {
-                if (activeFilter === 'all') html += renderSectionLabel('waveform', 'BGMs & Instrumentals', bgms.length);
+                if (activeFilter === 'all') html += renderSectionLabel('audio-lines', 'BGMs & Instrumentals', bgms.length);
                 html += `<div class="track-list">${bgms.map(t => renderSongRow(t, t._searchIndex)).join('')}</div>`;
             }
         }
@@ -1211,7 +1325,7 @@ function renderSearchResults(results, filter) {
     }
 
     container.innerHTML = html;
-    lucide.createIcons({ nodes: [container] });
+    safeCreateIcons({ nodes: [container] });
 }
 
 
@@ -1229,14 +1343,37 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 
+let currentSuggestionAbortController = null;
+const suggestionMemoryCache = new Map();
+
 async function fetchSuggestions(query) {
-    if (!query || query.length < 2) {
+    if (!query || query.trim().length < 2) {
         document.getElementById('search-suggestions')?.classList.add('hidden');
         return;
     }
 
+    const trimmed = query.trim().toLowerCase();
+
+    // 1. Instant client-side memory cache
+    if (suggestionMemoryCache.has(trimmed)) {
+        const cached = suggestionMemoryCache.get(trimmed);
+        if (cached && cached.length > 0) {
+            renderSuggestions(cached);
+        } else {
+            document.getElementById('search-suggestions')?.classList.add('hidden');
+        }
+        return;
+    }
+
+    // 2. Abort previous in-flight suggestion request to eliminate race conditions & network waste
+    if (currentSuggestionAbortController) {
+        currentSuggestionAbortController.abort();
+    }
+    currentSuggestionAbortController = new AbortController();
+    const signal = currentSuggestionAbortController.signal;
+
     try {
-        const data = await API.get(`/api/search/suggestions?q=${encodeURIComponent(query)}`);
+        const data = await API.get(`/api/search/suggestions?q=${encodeURIComponent(trimmed)}`, { signal });
         if (data && data.suggestions && data.suggestions.length > 0) {
             const blocked = [
                 'trailer', 'teaser', 'review', 'reaction', 'full movie', 'movie review',
@@ -1247,15 +1384,25 @@ async function fetchSuggestions(query) {
                 const sLow = s.toLowerCase();
                 return !blocked.some(b => sLow.includes(b));
             });
+
+            // Cache in memory (max 50 entries)
+            if (suggestionMemoryCache.size >= 50) {
+                const firstKey = suggestionMemoryCache.keys().next().value;
+                suggestionMemoryCache.delete(firstKey);
+            }
+            suggestionMemoryCache.set(trimmed, cleaned);
+
             if (cleaned.length > 0) {
                 renderSuggestions(cleaned);
             } else {
                 document.getElementById('search-suggestions')?.classList.add('hidden');
             }
         } else {
+            suggestionMemoryCache.set(trimmed, []);
             document.getElementById('search-suggestions')?.classList.add('hidden');
         }
-    } catch {
+    } catch (err) {
+        if (err.name === 'AbortError') return;
         document.getElementById('search-suggestions')?.classList.add('hidden');
     }
 }
@@ -1271,10 +1418,15 @@ function renderSuggestions(suggestions) {
         </div>
     `).join('');
     container.classList.remove('hidden');
-    lucide.createIcons({ nodes: [container] });
+    safeCreateIcons({ nodes: [container] });
 }
 
 function selectSuggestion(query) {
+    clearTimeout(searchDebounceTimer);
+    if (currentSuggestionAbortController) {
+        currentSuggestionAbortController.abort();
+        currentSuggestionAbortController = null;
+    }
     const input = document.getElementById('search-input');
     if (input) input.value = query;
     document.getElementById('search-clear')?.classList.remove('hidden');
@@ -1313,6 +1465,16 @@ function restorePageState() {
             document.getElementById('search-clear')?.classList.remove('hidden');
             document.getElementById('search-suggestions')?.classList.add('hidden');
             document.getElementById('search-browse-tags')?.classList.add('hidden');
+
+            // If an identical search is already active or searchResults match this query, DO NOT trigger duplicate search
+            if (AppState.isSearching && activeSearchQuery === query) {
+                return;
+            }
+            if (AppState.lastSearchQuery === query && AppState.searchResults && AppState.searchResults.length > 0) {
+                document.getElementById('search-filter-tabs')?.classList.remove('hidden');
+                renderSearchResults(AppState.searchResults, AppState.activeSearchFilter || 'all');
+                return;
+            }
 
             let renderedFromCache = false;
             try {
@@ -1369,14 +1531,30 @@ function renderTrackCards(tracks, containerId) {
     const container = document.getElementById(containerId);
     if (!container) return;
 
-    if (!tracks || tracks.length === 0) {
+    // Defense-in-depth: Filter out compilations, multi-hour mixes, and unofficial junk
+    const validTracks = (tracks || []).filter(t => {
+        if (!t) return false;
+        const dur = parseInt(t.duration) || 0;
+        if (dur > 360) return false;
+        const title = (t.title || t.track_name || '').toLowerCase();
+        if (/jukebox|all songs|full album|top\s*\d+|non[\s-]*stop|nonstop|compilation|lofi\s*hip\s*hop|beats\s*to\s*relax|audio\s*playlist|superhit\s*songs|best\s*of|100\s*hits|spotify\s*202|pop\s*music\s*202/i.test(title)) {
+            return false;
+        }
+        const ch = (t.channel || t.artist || t.uploader || '').toLowerCase();
+        if (/romantic\s*songs|top\s*trending|top\s*playlist|non\s*stop|billboard\s*top|chill\s*lofi|lofi\s*girl|the\s*paradise|part-\d+|hit\s*official/i.test(ch)) {
+            return false;
+        }
+        return true;
+    });
+
+    if (!validTracks || validTracks.length === 0) {
         container.innerHTML = `<div class="empty-state-card"><p>No songs available</p></div>`;
         return;
     }
 
     AppState.knownTracks = AppState.knownTracks || {};
 
-    container.innerHTML = tracks.map((track, i) => {
+    container.innerHTML = validTracks.map((track, i) => {
         const meta = getTrackMetadata(track);
         const name = escapeHtml(meta.title);
         const sub = escapeHtml(meta.subtitle || meta.movie || meta.artist || '');
@@ -1411,7 +1589,7 @@ function renderTrackCards(tracks, containerId) {
         `;
     }).join('');
 
-    lucide.createIcons({ nodes: [container] });
+    safeCreateIcons({ nodes: [container] });
 }
 
 
@@ -1436,58 +1614,108 @@ function playSingleTrack(videoId, trackData = null) {
         };
     }
 
-    if (typeof Player !== 'undefined') {
-        let queueList = [track];
-        let queueIdx = 0;
-        if (allKnown.length > 1) {
-            const seen = new Set();
-            const unique = [];
-            for (const t of allKnown) {
-                if (t && t.video_id && !seen.has(t.video_id)) {
-                    seen.add(t.video_id);
-                    unique.push(t);
-                }
-            }
-            const foundIdx = unique.findIndex(t => t.video_id === videoId);
-            if (foundIdx !== -1) {
-                queueList = unique;
-                queueIdx = foundIdx;
+    const player = window.Player || (typeof Player !== 'undefined' ? Player : null);
+    if (!player) {
+        console.warn('Player engine initializing...');
+        setTimeout(() => playSingleTrack(videoId, trackData), 150);
+        return;
+    }
+
+    let queueList = [track];
+    let queueIdx = 0;
+    if (allKnown.length > 1) {
+        const seen = new Set();
+        const unique = [];
+        for (const t of allKnown) {
+            if (t && t.video_id && !seen.has(t.video_id)) {
+                seen.add(t.video_id);
+                unique.push(t);
             }
         }
-        Player.setQueue(queueList, queueIdx);
-        Player.play(track);
+        const foundIdx = unique.findIndex(t => t.video_id === videoId);
+        if (foundIdx !== -1) {
+            queueList = unique;
+            queueIdx = foundIdx;
+        }
     }
+    player.setQueue(queueList, queueIdx);
+    player.play(track);
 }
 
-// Global alias for compatibility
+// Global aliases for compatibility & inline HTML event handlers
+window.playSingleTrack = playSingleTrack;
 window.playTrack = playSingleTrack;
 
+let _lastPlayResultTime = 0;
+let _lastPlayResultVideoId = null;
+
 function playTrackFromResults(index) {
-    const track = AppState.searchResults[index];
+    if (index === undefined || index === null) return;
+    const idx = parseInt(index, 10);
+    const track = AppState.searchResults?.[idx];
     if (!track) return;
 
-    if (typeof Player !== 'undefined') {
-        const clickedType = classifyTrack(track);
-        let queueTracks = AppState.searchResults;
-        let targetIndex = index;
-        // If playing a song, queue only individual songs (exclude 30+ min playlists or movies)
-        if (clickedType === 'song') {
-            const songTracks = AppState.searchResults.filter(t => classifyTrack(t) === 'song');
-            if (songTracks.length > 0) {
-                const newIdx = songTracks.findIndex(t => t.video_id === track.video_id);
-                if (newIdx !== -1) {
-                    queueTracks = songTracks;
-                    targetIndex = newIdx;
-                }
+    // Prevent duplicate rapid calls (e.g. inline onclick + delegated container click)
+    const now = Date.now();
+    if (_lastPlayResultVideoId === track.video_id && (now - _lastPlayResultTime < 400)) {
+        return;
+    }
+    _lastPlayResultVideoId = track.video_id;
+    _lastPlayResultTime = now;
+
+    const player = window.Player || (typeof Player !== 'undefined' ? Player : null);
+    if (!player) {
+        console.warn('Player engine initializing...');
+        setTimeout(() => playTrackFromResults(index), 150);
+        return;
+    }
+
+    const clickedType = classifyTrack(track);
+    let queueTracks = AppState.searchResults || [];
+    let targetIndex = idx;
+    // If playing a song, queue only individual songs (exclude 30+ min playlists or movies)
+    if (clickedType === 'song') {
+        const songTracks = queueTracks.filter(t => classifyTrack(t) === 'song');
+        if (songTracks.length > 0) {
+            const newIdx = songTracks.findIndex(t => t.video_id === track.video_id);
+            if (newIdx !== -1) {
+                queueTracks = songTracks;
+                targetIndex = newIdx;
             }
         }
-        Player.setQueue(queueTracks, targetIndex);
-        Player.play(track);
+    }
+    player.setQueue(queueTracks, targetIndex);
+    player.play(track);
+}
+window.playTrackFromResults = playTrackFromResults;
+
+function downloadSongByIndex(index) {
+    const track = AppState.searchResults?.[index];
+    if (!track) return;
+    const meta = typeof getTrackMetadata === 'function' ? getTrackMetadata(track) : {};
+    downloadSong(track.video_id, meta.title || track.track_name || track.title, meta.movie || meta.artist || track.artist);
+}
+window.downloadSongByIndex = downloadSongByIndex;
+
+function openAddToPlaylistByIndex(index) {
+    const track = AppState.searchResults?.[index];
+    if (!track) return;
+    const meta = typeof getTrackMetadata === 'function' ? getTrackMetadata(track) : {};
+    const safeObj = {
+        ...track,
+        track_name: meta.title || track.track_name || track.title,
+        movie: meta.movie || track.movie || '',
+        language: meta.language || track.language || '',
+        subtitle: meta.subtitle || track.subtitle || ''
+    };
+    if (typeof Library !== 'undefined' && Library.openAddToPlaylistModal) {
+        Library.openAddToPlaylistModal(track.video_id, safeObj);
     }
 }
+window.openAddToPlaylistByIndex = openAddToPlaylistByIndex;
 
 function addToQueue(index) {
-    const track = AppState.searchResults[index];
+    const track = AppState.searchResults?.[index];
     if (!track) return;
 
     if (typeof Player !== 'undefined') {
@@ -1495,6 +1723,7 @@ function addToQueue(index) {
         showToast(`Added "${track.track_name || track.title}" to queue`);
     }
 }
+window.addToQueue = addToQueue;
 
 async function downloadSong(videoId, title, artist) {
     showToast(`Starting download: ${title}...`);
@@ -1568,14 +1797,28 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('search-clear')?.classList.toggle('hidden', !query);
 
             clearTimeout(searchDebounceTimer);
+            if (!query || query.trim().length < 2) {
+                if (currentSuggestionAbortController) {
+                    currentSuggestionAbortController.abort();
+                    currentSuggestionAbortController = null;
+                }
+                document.getElementById('search-suggestions')?.classList.add('hidden');
+                return;
+            }
+
             searchDebounceTimer = setTimeout(() => {
                 fetchSuggestions(query);
-            }, 250);
+            }, 280);
         });
 
         searchInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();
+                clearTimeout(searchDebounceTimer);
+                if (currentSuggestionAbortController) {
+                    currentSuggestionAbortController.abort();
+                    currentSuggestionAbortController = null;
+                }
                 document.getElementById('search-suggestions')?.classList.add('hidden');
                 performSearch(searchInput.value);
             }
@@ -1589,6 +1832,18 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     document.getElementById('search-clear')?.addEventListener('click', () => {
+        clearTimeout(searchDebounceTimer);
+        if (currentSuggestionAbortController) {
+            currentSuggestionAbortController.abort();
+            currentSuggestionAbortController = null;
+        }
+        if (currentSearchAbortController) {
+            currentSearchAbortController.abort();
+            currentSearchAbortController = null;
+        }
+        AppState.isSearching = false;
+        activeSearchQuery = null;
+
         const input = document.getElementById('search-input');
         if (input) {
             input.value = '';
@@ -1612,8 +1867,28 @@ document.addEventListener('DOMContentLoaded', () => {
                 <p>Type any song name, movie, singer, or genre in any language</p>
             </div>
         `;
-        lucide.createIcons({ nodes: [document.getElementById('search-results')] });
+        safeCreateIcons({ nodes: [document.getElementById('search-results')] });
     });
+
+    // Delegated click listener on search results for infallible playback
+    const searchResultsContainer = document.getElementById('search-results');
+    if (searchResultsContainer) {
+        searchResultsContainer.addEventListener('click', (e) => {
+            if (e.target.closest('.track-row-actions') || e.target.closest('button')) return;
+            const row = e.target.closest('.track-row');
+            if (!row) return;
+            const idxStr = row.dataset.searchIndex;
+            const vid = row.dataset.videoId;
+            if (idxStr !== undefined) {
+                playTrackFromResults(parseInt(idxStr, 10));
+            } else if (vid && AppState.searchResults) {
+                const foundIdx = AppState.searchResults.findIndex(t => t.video_id === vid);
+                if (foundIdx !== -1) {
+                    playTrackFromResults(foundIdx);
+                }
+            }
+        });
+    }
 
     // Keyboard shortcuts
     document.addEventListener('keydown', (e) => {

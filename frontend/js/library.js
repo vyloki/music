@@ -66,18 +66,38 @@ const Library = {
     // Playlists in Sidebar
     // ============================================
 
-    async loadPlaylistsNav() {
+    _loadPlaylistsPromise: null,
+    _playlistsCacheTime: 0,
+
+    async loadPlaylistsNav(force = false) {
         if (!AppState.isAuthenticated) return;
 
-        try {
-            const data = await API.get('/api/playlists');
-            if (data && data.playlists) {
-                this.playlists = data.playlists;
-                this.renderPlaylistsNav();
-            }
-        } catch (e) {
-            console.debug('Playlists load failed:', e);
+        const now = Date.now();
+        if (!force && this.playlists && this.playlists.length > 0 && (now - this._playlistsCacheTime < 15000)) {
+            this.renderPlaylistsNav();
+            return;
         }
+
+        if (this._loadPlaylistsPromise) {
+            return this._loadPlaylistsPromise;
+        }
+
+        this._loadPlaylistsPromise = (async () => {
+            try {
+                const data = await API.get('/api/playlists');
+                if (data && data.playlists) {
+                    this.playlists = data.playlists;
+                    this._playlistsCacheTime = Date.now();
+                    this.renderPlaylistsNav();
+                }
+            } catch (e) {
+                console.debug('Playlists load failed:', e);
+            }
+        })().finally(() => {
+            this._loadPlaylistsPromise = null;
+        });
+
+        return this._loadPlaylistsPromise;
     },
 
     renderPlaylistsNav() {
@@ -96,7 +116,7 @@ const Library = {
             </li>
         `).join('');
 
-        lucide.createIcons({ nodes: [container] });
+        safeCreateIcons({ nodes: [container] });
     },
 
     // ============================================
@@ -212,7 +232,7 @@ const Library = {
                 </div>
             `;
         }
-        lucide.createIcons({ nodes: [container] });
+        safeCreateIcons({ nodes: [container] });
     },
 
     async renderPlaylistsTab(container) {
@@ -236,7 +256,7 @@ const Library = {
                 `).join('')}
             </div>
         `;
-        lucide.createIcons({ nodes: [container] });
+        safeCreateIcons({ nodes: [container] });
     },
 
     playHistoryTrack(index) {
@@ -292,7 +312,7 @@ const Library = {
         } catch {
             container.innerHTML = `<div class="empty-state"><i data-lucide="clock"></i><p>Could not load history</p></div>`;
         }
-        lucide.createIcons({ nodes: [container] });
+        safeCreateIcons({ nodes: [container] });
     },
 
     // ============================================
@@ -384,7 +404,7 @@ const Library = {
                     listContainer.innerHTML = `<div class="empty-state"><i data-lucide="music"></i><p>This playlist is empty. Search for songs and click '+' to add them!</p></div>`;
                 }
 
-                lucide.createIcons({ nodes: [document.getElementById('page-playlist-detail')] });
+                safeCreateIcons({ nodes: [document.getElementById('page-playlist-detail')] });
             }
         } catch (e) {
             showToast('Failed to load playlist', 'error');
@@ -601,7 +621,7 @@ const Library = {
             extractLikeBtn.innerHTML = isLiked
                 ? `<i data-lucide="heart" style="fill: var(--color-error); color: var(--color-error);"></i> Liked`
                 : `<i data-lucide="heart"></i> Like`;
-            lucide.createIcons({ nodes: [extractLikeBtn] });
+            safeCreateIcons({ nodes: [extractLikeBtn] });
         }
     },
 
@@ -620,6 +640,8 @@ const Library = {
         }
     }
 };
+
+window.Library = Library;
 
 document.addEventListener('DOMContentLoaded', () => {
     Library.init();

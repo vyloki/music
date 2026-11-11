@@ -214,7 +214,11 @@ const LocalLibrary = {
             </div>
         `;
 
-        lucide.createIcons({ nodes: [container] });
+        if (window.safeCreateIcons) {
+            window.safeCreateIcons({ nodes: [container] });
+        } else if (typeof lucide !== 'undefined' && lucide?.createIcons) {
+            lucide.createIcons({ nodes: [container] });
+        }
 
         // Bind file picker
         const fileInput = document.getElementById('local-file-input');

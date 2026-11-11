@@ -60,3 +60,9 @@ class HistoryEntry(BaseModel):
     movie: Optional[str] = ""
     language: Optional[str] = ""
     subtitle: Optional[str] = ""
+
+
+class HistoryBatchRequest(BaseModel):
+    """Schema for batch recording multiple play events."""
+    entries: List[HistoryEntry] = Field(..., max_length=50)
+

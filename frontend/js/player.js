@@ -658,9 +658,13 @@ const Player = {
             this.saveToLocalHistory(track);
         }
 
-        // Prevent double execution on rapid touches
-        if (this._currentLoadingId === track.video_id && this.isPlaying) return;
+        // Prevent double execution on rapid touches or synchronous duplicate events
+        const now = Date.now();
+        if (this._currentLoadingId === track.video_id && (this.isPlaying || (now - (this._lastPlayAttemptTime || 0) < 600))) {
+            return;
+        }
         this._currentLoadingId = track.video_id;
+        this._lastPlayAttemptTime = now;
 
         // Set audio stream URL (local blob, extracted link proxy, or standard stream proxy)
         let streamSrc = '';
@@ -752,7 +756,7 @@ const Player = {
 
         // Refresh recently played on Home
         if (typeof loadHomeRecentlyPlayed === 'function') {
-            loadHomeRecentlyPlayed();
+            loadHomeRecentlyPlayed(true);
         }
 
         // Auto-refresh lyrics if overlay is open
@@ -793,6 +797,9 @@ const Player = {
             const data = await API.get(
                 `/api/songs/${track.video_id}/languages?track_name=${trackName}&movie=${movie}`
             );
+
+            // Abort updating UI if user has already changed track in the meantime
+            if (this.currentTrack?.video_id !== track.video_id) return;
 
             // Construct complete list of versions including current playing track
             const versionsMap = new Map();
@@ -1217,7 +1224,7 @@ const Player = {
                     <p>Your queue is empty. Click any song to start playing.</p>
                 </div>
             `;
-            lucide.createIcons({ nodes: [container] });
+            safeCreateIcons({ nodes: [container] });
             return;
         }
 
@@ -1308,7 +1315,7 @@ const Player = {
         }
 
         container.innerHTML = html;
-        lucide.createIcons({ nodes: [container] });
+        safeCreateIcons({ nodes: [container] });
     },
 
     // ============================================
@@ -1351,7 +1358,7 @@ const Player = {
         else if (this.volume < 50) iconName = 'volume-1';
 
         btn.innerHTML = `<i data-lucide="${iconName}"></i>`;
-        lucide.createIcons({ nodes: [btn] });
+        safeCreateIcons({ nodes: [btn] });
     },
 
     // ============================================
@@ -1414,7 +1421,7 @@ const Player = {
         if (this.elements.lyricsLikeBtn) {
             this.elements.lyricsLikeBtn.classList.toggle('active', isLiked);
             this.elements.lyricsLikeBtn.innerHTML = `<i data-lucide="heart" ${isLiked ? 'style="fill: currentColor;"' : ''}></i>`;
-            lucide.createIcons({ nodes: [this.elements.lyricsLikeBtn] });
+            safeCreateIcons({ nodes: [this.elements.lyricsLikeBtn] });
         }
     },
 
@@ -1536,13 +1543,13 @@ const Player = {
         const btn = this.elements.playBtn;
         if (btn) {
             btn.innerHTML = `<i data-lucide="${playing ? 'pause' : 'play'}"></i>`;
-            lucide.createIcons({ nodes: [btn] });
+            safeCreateIcons({ nodes: [btn] });
         }
 
         const lyricsPlayBtn = this.elements.lyricsPlayBtn;
         if (lyricsPlayBtn) {
             lyricsPlayBtn.innerHTML = `<i data-lucide="${playing ? 'pause' : 'play'}"></i>`;
-            lucide.createIcons({ nodes: [lyricsPlayBtn] });
+            safeCreateIcons({ nodes: [lyricsPlayBtn] });
         }
 
         // Show/hide animated waveform equalizer bars
@@ -1780,6 +1787,9 @@ const Player = {
         }
     },
 };
+
+window.Player = Player;
+window.YTBridge = YTBridge;
 
 document.addEventListener('DOMContentLoaded', () => {
     Player.init();

@@ -10,7 +10,7 @@ const Extract = {
 
     init() {
         this.bindEvents();
-        this.loadHistory();
+        // Note: loadHistory() is loaded lazily on navigation to #extract tab to eliminate unwanted startup API calls
     },
 
     bindEvents() {
@@ -153,7 +153,7 @@ const Extract = {
             if (errorEl && errorMsg) {
                 errorMsg.textContent = err.message || 'Could not extract audio from this link. Make sure the link is public and accessible.';
                 errorEl.classList.remove('hidden');
-                lucide.createIcons({ nodes: [errorEl] });
+                safeCreateIcons({ nodes: [errorEl] });
             }
             showToast('Extraction failed. Please check the link.', 'error');
         }
@@ -221,7 +221,7 @@ const Extract = {
         `;
 
         resultContainer.classList.remove('hidden');
-        lucide.createIcons({ nodes: [resultContainer] });
+        safeCreateIcons({ nodes: [resultContainer] });
 
         // Bind Action Buttons
         document.getElementById('btn-extract-play')?.addEventListener('click', () => {
@@ -256,7 +256,7 @@ const Extract = {
                             icon.style.color = '';
                         }
                     }
-                    lucide.createIcons({ nodes: [btn] });
+                    safeCreateIcons({ nodes: [btn] });
                 }
             }
         });
@@ -297,9 +297,13 @@ const Extract = {
         document.body.removeChild(link);
     },
 
+    _isLoadingHistory: false,
+
     async loadHistory() {
         const container = document.getElementById('extract-history-list');
         if (!container) return;
+        if (this._isLoadingHistory) return;
+        this._isLoadingHistory = true;
 
         let historyItems = [];
 
@@ -316,7 +320,9 @@ const Extract = {
                 historyItems = data.history;
                 localStorage.setItem('wave_extract_history', JSON.stringify(historyItems));
             }
-        } catch (e) {}
+        } catch (e) {} finally {
+            this._isLoadingHistory = false;
+        }
 
         if (historyItems.length === 0) {
             container.innerHTML = `
@@ -325,7 +331,7 @@ const Extract = {
                     <p>No links extracted yet. Paste a link above to begin.</p>
                 </div>
             `;
-            lucide.createIcons({ nodes: [container] });
+            safeCreateIcons({ nodes: [container] });
             return;
         }
 
@@ -389,7 +395,7 @@ const Extract = {
         }).join('');
 
         this._historyCache = historyItems;
-        lucide.createIcons({ nodes: [container] });
+        safeCreateIcons({ nodes: [container] });
     },
 
     getHistoryTrack(index) {

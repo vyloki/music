@@ -6,7 +6,7 @@ Track what the user listens to with MongoDB storage and optional authentication.
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from app.database import get_db
 from app.utils.security import get_optional_user
-from app.models.playlist import HistoryEntry
+from app.models.playlist import HistoryEntry, HistoryBatchRequest
 from bson import ObjectId
 from datetime import datetime, timezone
 import logging
@@ -51,6 +51,43 @@ async def _record_history(db, user_id: ObjectId, data: HistoryEntry) -> None:
         logger.debug(f"History background record error: {e}")
 
 
+async def _record_history_batch(db, user_id: ObjectId, entries: list[HistoryEntry]) -> None:
+    """Offload bulk document insertion and daily tracking updates to background task."""
+    try:
+        now = datetime.now(timezone.utc)
+        docs = []
+        for data in entries:
+            docs.append({
+                "user_id": user_id,
+                "video_id": data.video_id,
+                "title": data.title,
+                "artist": data.artist,
+                "thumbnail": data.thumbnail,
+                "duration": getattr(data, "duration", 0) or 0,
+                "movie": data.movie or "",
+                "language": data.language or "",
+                "subtitle": data.subtitle or "",
+                "played_at": now,
+            })
+        if docs:
+            await db.listening_history.insert_many(docs, ordered=False)
+            today_str = now.strftime("%Y-%m-%d")
+            try:
+                await db.daily_tracking.update_one(
+                    {"user_id": user_id, "date": today_str},
+                    {
+                        "$inc": {"play_count": len(docs)},
+                        "$set": {"last_played": now},
+                        "$setOnInsert": {"user_id": user_id, "date": today_str},
+                    },
+                    upsert=True,
+                )
+            except Exception as te:
+                logger.debug(f"Daily tracking batch update note: {te}")
+    except Exception as e:
+        logger.debug(f"History batch background record error: {e}")
+
+
 @router.post("", summary="Record a play event")
 async def record_play(
     data: HistoryEntry,
@@ -64,6 +101,21 @@ async def record_play(
         background_tasks.add_task(_record_history, db, user_id, data)
 
     return {"status": "recorded"}
+
+
+@router.post("/batch", summary="Batch record play events")
+async def record_play_batch(
+    payload: HistoryBatchRequest,
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(get_optional_user),
+    db=Depends(get_db),
+):
+    """Record multiple tracks played in a single atomic request (e.g. on client sync)."""
+    if user and db is not None and payload.entries:
+        user_id = ObjectId(user["_id"]) if ObjectId.is_valid(user["_id"]) else user["_id"]
+        background_tasks.add_task(_record_history_batch, db, user_id, payload.entries)
+
+    return {"status": "recorded", "count": len(payload.entries)}
 
 
 @router.get("", summary="Get recent listening history")
